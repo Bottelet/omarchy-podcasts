@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 297-check offline suite with a stub curl |
+| `tests/` | 300-check offline suite with a stub curl |
 
 ## Technical
 
@@ -254,11 +254,18 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
-- **A cap refuses; it never truncates.** More subscriptions, queue entries or
-  triage records than the plugin will handle stops the command and leaves the
-  file alone. Truncating instead would delete the remainder the moment
-  anything else wrote — the same silent-loss shape as reading a broken file
-  as empty, with a higher threshold and a longer fuse.
+- **A cap refuses; it never truncates — and sits where nobody reaches it.**
+  More subscriptions, queue entries or triage records than the plugin will
+  handle stops the command and leaves the file alone; truncating would delete
+  the remainder the moment anything else wrote, which is the same silent-loss
+  shape as reading a broken file as empty with a longer fuse. But a refusal
+  the user cannot escape is its own trap: over the cap *every* command fails,
+  including the ones that would bring them back under it. So the record caps
+  are set beyond any real library (20,000 shows), where they only ever fire
+  on a file nothing here wrote — a realistic library meets the 8 MB byte cap
+  first — and the message names the file and says trimming it is the way
+  back. The byte cap is the memory bound; the record caps exist for the one
+  case it cannot catch, a small file holding a great many tiny records.
 - **The state directory itself is checked for a symlink.** `O_NOFOLLOW` only
   refuses a link at the final component, and `makedirs(exist_ok=True)` walks
   into a linked directory without complaint — which would send every read and
@@ -321,7 +328,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (297 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (300 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

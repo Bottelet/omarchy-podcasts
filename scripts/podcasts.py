@@ -67,9 +67,16 @@ ART_CACHE_BYTES = 50 * 1024 * 1024
 # not ours to trust either. Generous next to what they really hold: a hundred
 # shows is a few hundred KB, and a hundred episodes about 120 KB.
 MAX_STATE_BYTES = 8 * 1024 * 1024
-MAX_SHOWS = 2000
-MAX_QUEUE = 10000
-MAX_TRIAGE = 100000
+# The byte cap above is the real memory bound. These exist for the case it
+# cannot catch — a small file holding a great many tiny records — so they are
+# set where no real library reaches them. Refusing is right (truncating
+# deletes), but a refusal the user cannot get out of is its own trap: over
+# the cap, every command fails, including the ones that would bring them back
+# under it. Twenty thousand subscriptions is beyond any real listener and is
+# reached by the byte cap first anyway.
+MAX_SHOWS = 20000
+MAX_QUEUE = 50000
+MAX_TRIAGE = 500000
 STALE_AFTER_FAILURES = 4
 USER_AGENT = "omarchy-podcasts/1.0 (+https://omarchyplugins.com)"
 
@@ -294,9 +301,9 @@ def load_shows():
         fail("your subscriptions file is not a list; leaving it alone rather "
              "than overwriting it")
     if len(shows) > MAX_SHOWS:
-        fail("your subscriptions file lists %d shows, more than the %d this "
-             "plugin will handle; leaving it alone rather than dropping the "
-             "rest" % (len(shows), MAX_SHOWS))
+        fail("%s lists %d shows, more than the %d this plugin will handle. "
+             "It has been left untouched — trim it and the plugin will read "
+             "it again." % (SHOWS_FILE, len(shows), MAX_SHOWS))
     out = []
     seen = set()
     for show in shows:
@@ -356,8 +363,9 @@ def load_library():
                                ("triage", triage, MAX_TRIAGE),
                                ("positions", positions, MAX_TRIAGE)):
         if len(value) > limit:
-            fail("your queue file holds %d %s entries, more than the %d this "
-                 "plugin will handle; leaving it alone" % (len(value), name, limit))
+            fail("%s holds %d %s entries, more than the %d this plugin will "
+                 "handle. It has been left untouched — trim it and the plugin "
+                 "will read it again." % (LIBRARY_FILE, len(value), name, limit))
     out["queue"] = [x for x in queue if isinstance(x, str) and ID_RE.match(x)]
     out["triage"] = {}
     for key, value in triage.items():

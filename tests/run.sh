@@ -663,21 +663,52 @@ rm -f "$OMARCHY_PODCASTS_DIR/shows.json"
 
 # A cap that truncates is a cap that deletes: the next command to end in a
 # full rewrite persists the shortened list.
+OVER=$(python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('pc', sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+print(pc.MAX_SHOWS + 5)" "$SCRIPT")
 python3 -c "
-import json, os
+import json, os, sys
 json.dump([{'id': '%012x' % i, 'feed': 'https://f%d.example/rss' % i}
-           for i in range(2005)],
-          open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json', 'w'))"
+           for i in range(int(sys.argv[1]))],
+          open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json', 'w'))" "$OVER"
 run shows
 check "more subscriptions than the cap is refused, not truncated" '.ok' 'false'
-BEFORE_ROWS="$(python3 -c "
+check "…and the message says where to fix it" '.error | test("shows.json")' 'true'
+LEFT="$(python3 -c "
 import json, os
 print(len(json.load(open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json'))))")"
-if [[ "$BEFORE_ROWS" == "2005" ]]; then
+if [[ "$LEFT" == "$OVER" ]]; then
   ok "…and every one of them is still on disk"
 else
-  bad "…and every one of them is still on disk" "$BEFORE_ROWS remain"
+  bad "…and every one of them is still on disk" "$LEFT of $OVER remain"
 fi
+
+# The cap must sit beyond any real library, because over it every command
+# fails — including the ones that would bring the user back under it.
+while IFS=$'\t' read -r verdict name detail; do
+  [[ -z "${verdict:-}" ]] && continue
+  if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
+done < <(python3 - "$SCRIPT" <<'PYINNER'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+# The record cap catches what the byte cap cannot — a small file holding a
+# great many tiny records — so it cannot be derived from MAX_STATE_BYTES.
+# What it must be is far beyond any real library, since over it every command
+# fails, including the ones that would bring the user back under.
+print("PASS\tthe record cap is out of a real library's reach"
+      if pc.MAX_SHOWS >= 20000 and pc.MAX_QUEUE >= 50000
+      else "FAIL\tthe record cap is out of a real library's reach\t%d/%d"
+           % (pc.MAX_SHOWS, pc.MAX_QUEUE))
+# A realistic record is ~1 KB, so a real library hits the byte cap first and
+# the record cap only ever fires on a file nothing here wrote.
+print("PASS\t…and a realistic library meets the byte cap first"
+      if pc.MAX_SHOWS * 1000 > pc.MAX_STATE_BYTES
+      else "FAIL\t…and a realistic library meets the byte cap first")
+PYINNER
+)
 
 # O_NOFOLLOW only refuses a link at the final component; a link at the state
 # directory sends every read and write somewhere else, and makedirs follows
