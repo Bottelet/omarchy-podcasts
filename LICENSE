@@ -1,0 +1,61 @@
+MIT License
+
+Copyright (c) 2026 Casper Bottelet
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+External dependencies and services
+==================================
+
+Command-line tools (all ship with a stock Omarchy install):
+
+  - mpv               the audio engine; driven over a JSON IPC socket, never
+                      given a feed-supplied string on its command line
+  - python3           feed parsing, library state and every network fetch
+                      (stdlib only — no pip packages)
+  - curl              every HTTPS request, always as an argv list, never
+                      through a shell
+  - notify-send       desktop notifications for auto-queue shows
+  - omarchy-file-select   the desktop file chooser, for OPML import/export
+
+Optional, used when present:
+
+  - mpv-mpris         (/etc/mpv/scripts/mpris.so on stock Omarchy) publishes
+                      playback on D-Bus so other now-playing widgets and
+                      media keys see this player. Nothing breaks without it.
+
+Network services contacted over HTTPS:
+
+  - itunes.apple.com          podcast directory search (no account, no key;
+                              the default and only search backend needed)
+  - api.podcastindex.org      optional alternative search, used only when the
+                              user supplies their own API key and secret
+  - the podcast feeds, enclosures, artwork, and Podcasting 2.0 chapter files
+    the user subscribes to — all URLs come from the user or from the feeds
+    they chose to trust
+
+An optional user-supplied Podcast Index key and secret (stored in this
+plugin's own settings) are sent only to api.podcastindex.org.
+
+Privilege boundary: the plugin makes outbound HTTPS requests, runs mpv as a
+child process, raises desktop notifications, and writes only to
+~/.local/share/omarchy-podcasts/ and its own entry in
+~/.config/omarchy/shell.json. It does not modify any other user configuration.

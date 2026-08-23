@@ -1,0 +1,9 @@
+# Agent/session scratch, never part of the plugin.
+.omc/
+
+# Handover spec — a working document, not something an installer needs.
+SPEC.md
+
+# Python bytecode from running the helper or the suite in place.
+__pycache__/
+*.pyc

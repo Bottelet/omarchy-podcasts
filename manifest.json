@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "id": "bottelet.podcasts",
+  "name": "Podcasts",
+  "version": "0.1.0",
+  "author": "Casper Bottelet",
+  "license": "MIT",
+  "description": "A podcast client in the bar: episode inbox with quick triage, queue playback via mpv with silence skipping and voice boost, chapters, and gpodder/AntennaPod position sync.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Podcasts",
+    "description": "Podcast inbox, queue, and player",
+    "category": "Media",
+    "aliases": [
+      "podcast",
+      "podcasts",
+      "player"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "pollMinutes": 30,
+      "defaultSpeed": 1.0,
+      "voiceBoost": false
+    },
+    "schema": [
+      {
+        "key": "pollMinutes",
+        "type": "integer",
+        "label": "Check for new episodes every",
+        "min": 10,
+        "max": 720,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "Minutes between feed polls. Shows are staggered and jittered so they never all fetch at once."
+      },
+      {
+        "key": "defaultSpeed",
+        "type": "number",
+        "label": "Default speed",
+        "min": 0.8,
+        "max": 3.0,
+        "step": 0.1,
+        "defaultValue": 1.0,
+        "description": "Playback speed for shows that have no speed of their own."
+      },
+      {
+        "key": "voiceBoost",
+        "type": "boolean",
+        "label": "Voice Boost",
+        "defaultValue": false,
+        "description": "Levels quiet talk against loud music and ads (mpv dynaudnorm)."
+      },
+      {
+        "key": "podcastIndexKey",
+        "type": "string",
+        "label": "Podcast Index API key",
+        "defaultValue": "",
+        "description": "Optional. Leave empty to search the iTunes directory, which needs no account."
+      },
+      {
+        "key": "podcastIndexSecret",
+        "type": "string",
+        "label": "Podcast Index API secret",
+        "defaultValue": "",
+        "description": "Optional. Paired with the API key above."
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0"
+     xmlns:media="http://search.yahoo.com/mrss/"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Test Show</title>
+    <link>https://example.com/show</link>
+    <description>&lt;p&gt;A &amp;amp; test&lt;/p&gt;</description>
+    <itunes:author>A Host</itunes:author>
+    <itunes:new-feed-url>https://example.com/moved.xml</itunes:new-feed-url>
+    <itunes:image href="https://example.com/art.jpg"/>
+    <item>
+      <title>Bell in the title</title>
+      <guid>guid-ctrl</guid>
+      <pubDate>Wed, 20 Aug 2026 09:00:00 +0000</pubDate>
+      <enclosure url="https://example.com/ctrl.mp3" type="audio/mpeg"/>
+    </item>
+  </channel>
+</rss>

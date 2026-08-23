@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0"
+     xmlns:media="http://search.yahoo.com/mrss/"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Test Show</title>
+    <link>https://example.com/show</link>
+    <description>&lt;p&gt;A &amp;amp; test&lt;/p&gt;</description>
+    <itunes:author>A Host</itunes:author>
+    <itunes:image href="https://example.com/art.jpg"/>
+    <item>
+      <title>Everything episode</title>
+      <guid isPermaLink="false">guid-full</guid>
+      <pubDate>Wed, 20 Aug 2026 09:00:00 +0000</pubDate>
+      <itunes:duration>1:02:03</itunes:duration>
+      <itunes:image href="https://example.com/ep.jpg"/>
+      <itunes:season>2</itunes:season>
+      <itunes:episode>17</itunes:episode>
+      <description>&lt;p&gt;Notes with &lt;a href="x"&gt;a link&lt;/a&gt; &amp;amp; an entity.&lt;/p&gt;</description>
+      <podcast:chapters url="https://example.com/chapters.json" type="application/json"/>
+      <podcast:transcript url="https://example.com/t.vtt" type="text/vtt"/>
+      <enclosure url="https://example.com/full.mp3" type="audio/mpeg" length="12345"/>
+    </item>
+    <item>
+      <title>No duration, no guid</title>
+      <pubDate>Tue, 19 Aug 2026 09:00:00 +0000</pubDate>
+      <enclosure url="https://example.com/noguid.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Media content only</title>
+      <guid>guid-media</guid>
+      <pubDate>Mon, 18 Aug 2026 09:00:00 +0000</pubDate>
+      <itunes:duration>930</itunes:duration>
+      <media:content url="https://example.com/media.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>No audio at all</title>
+      <guid>guid-noaudio</guid>
+      <pubDate>Sun, 17 Aug 2026 09:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Insecure enclosure</title>
+      <guid>guid-http</guid>
+      <pubDate>Sat, 16 Aug 2026 09:00:00 +0000</pubDate>
+      <itunes:duration>04:20</itunes:duration>
+      <enclosure url="http://example.com/old.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Chapters with the wrong type</title>
+      <guid>guid-badchapters</guid>
+      <pubDate>Fri, 15 Aug 2026 09:00:00 +0000</pubDate>
+      <podcast:chapters url="https://example.com/ch.txt" type="text/plain"/>
+      <enclosure url="https://example.com/badch.mp3" type="audio/mpeg"/>
+    </item>
+    <item>
+      <title>Oldest but listed last</title>
+      <guid>guid-oldest</guid>
+      <pubDate>Thu, 01 Jan 2026 09:00:00 +0000</pubDate>
+      <enclosure url="https://example.com/oldest.mp3" type="audio/mpeg"/>
+    </item>
+  </channel>
+</rss>

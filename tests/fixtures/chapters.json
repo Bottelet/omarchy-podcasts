@@ -1,0 +1,7 @@
+{"version":"1.2.0","chapters":[
+  {"startTime":300.5,"title":"Third <b>bold</b>"},
+  {"startTime":0,"title":"Intro"},
+  {"title":"No start time"},
+  {"startTime":120,"title":"Second","url":"https://example.com/link"},
+  "not an object"
+]}

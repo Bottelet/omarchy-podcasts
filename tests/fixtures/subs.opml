@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0"><head><title>subs</title></head><body>
+  <outline text="Folder">
+    <outline type="rss" text="Test Show" xmlUrl="https://example.com/feed.xml"/>
+  </outline>
+  <outline type="rss" text="Second" xmlUrl="https://example.com/second.xml"/>
+</body></opml>
