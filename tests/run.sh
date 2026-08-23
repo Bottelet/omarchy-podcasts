@@ -756,13 +756,41 @@ spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
 pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
 
 root = sys.argv[2]
+# save_json reports through fail(), which prints JSON on stdout and exits, so
+# it has to be kept out of this script's own tab-separated output.
+import contextlib, io
+noise = io.StringIO()
 try:
-    pc.save_json(os.path.join(root, "probe.json"), {"x": object()})
+    with contextlib.redirect_stdout(noise):
+        pc.save_json(os.path.join(root, "probe.json"), {"x": object()})
 except BaseException:
     pass
 left = glob.glob(os.path.join(root, ".write-*"))
 print("PASS\ta write that cannot serialise leaves no temp behind" if not left
       else "FAIL\ta write that cannot serialise leaves no temp behind\t%s" % left)
+print("PASS\t…and says so rather than crashing"
+      if '"ok":false' in noise.getvalue()
+      else "FAIL\t…and says so rather than crashing\t%r" % noise.getvalue()[:80])
+
+# A file the plugin writes must always read back: enforcing the size limit on
+# read alone let it write one it then refused to open, after which every
+# command failed — including the two that could get the user back under.
+oversized = [{"id": "%012x" % i, "feed": "https://f%d.example/rss" % i,
+              "description": "D" * 900} for i in range(9000)]
+noise = io.StringIO()
+wrote = None
+try:
+    with contextlib.redirect_stdout(noise):
+        pc.save_json(os.path.join(root, "oversized.json"), oversized)
+    wrote = True
+except SystemExit:
+    wrote = False
+print("PASS\tan oversized write is refused, not written" if wrote is False
+      else "FAIL\tan oversized write is refused, not written")
+print("PASS\t…leaving no file and no temp"
+      if not os.path.exists(os.path.join(root, "oversized.json"))
+      and not glob.glob(os.path.join(root, ".write-*"))
+      else "FAIL\t…leaving no file and no temp")
 
 # And the sweep clears anything a killed run left.
 stale = os.path.join(root, ".write-stale.tmp")

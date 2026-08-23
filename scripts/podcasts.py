@@ -198,8 +198,8 @@ def read_state(path, what, max_bytes=MAX_STATE_BYTES):
     except OSError as exc:
         fail("cannot read %s: %s" % (what, exc.strerror or exc))
     except StateTooLarge:
-        fail("%s is larger than %d MB, which nothing this plugin writes ever "
-             "is; leaving it alone" % (what, max_bytes // (1024 * 1024)))
+        fail("%s is larger than the %d MB this plugin will read; it has been "
+             "left untouched" % (what, max_bytes // (1024 * 1024)))
     except (ValueError, UnicodeDecodeError):
         fail("%s is corrupt; leaving it alone rather than overwriting it" % what)
 
@@ -253,13 +253,28 @@ def save_json(path, obj):
     user could drop a symlink there first and have the truncation land on
     whatever it pointed at. mkstemp creates with O_EXCL and O_CREAT at 0600
     under a name it chooses, which is exactly the property that was missing."""
+    # The size limit is checked here, on the way out, and not only on the way
+    # in. Enforcing it on read alone let the plugin write a file it would then
+    # refuse to open — and once that happened every command failed, including
+    # the only two that could get the user back under the limit.
+    try:
+        blob = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        fail("cannot store %s: %s" % (os.path.basename(path), exc))
+    data = blob.encode("utf-8")
+    if len(data) > MAX_STATE_BYTES:
+        fail("%s would come to %.1f MB, past the %d MB this plugin reads back; "
+             "refusing to write a file it could not then open"
+             % (path, len(data) / (1024.0 * 1024.0),
+                MAX_STATE_BYTES // (1024 * 1024)))
+
     handle = None
     tmp = ""
     try:
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                    prefix=".write-", suffix=".tmp")
         handle = os.fdopen(fd, "w", encoding="utf-8")
-        json.dump(obj, handle, separators=(",", ":"), ensure_ascii=False)
+        handle.write(blob)
         handle.flush()
         os.fsync(handle.fileno())
         handle.close()
@@ -1656,6 +1671,9 @@ def add_feed(shows, feed_url, allow_http=False, mode="inbox"):
     existing = find_show(shows, show_id)
     if existing:
         return existing, "already subscribed"
+    if len(shows) >= MAX_SHOWS:
+        return None, ("you already have %d subscriptions, which is as many as "
+                      "this plugin will keep track of" % MAX_SHOWS)
 
     show = default_show(url, show_id)
     show["allowHttp"] = bool(allow_http)
@@ -1968,6 +1986,10 @@ def cmd_opml_import(args):
             shows = load_shows()
             if find_show(shows, show_id):
                 skipped += 1
+                continue
+            if len(shows) >= MAX_SHOWS:
+                failed.append({"feed": candidate[:120], "title": title,
+                               "error": "subscription limit reached"})
                 continue
             save_json(episodes_path(show_id), items)
             shows.append(prepared)

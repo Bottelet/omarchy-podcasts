@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 300-check offline suite with a stub curl |
+| `tests/` | 303-check offline suite with a stub curl |
 
 ## Technical
 
@@ -266,6 +266,14 @@ Feed content is attacker-controlled and is handled that way:
   first — and the message names the file and says trimming it is the way
   back. The byte cap is the memory bound; the record caps exist for the one
   case it cannot catch, a small file holding a great many tiny records.
+
+  Both limits are enforced on the way *out* as well as in. Checking only on
+  read let the plugin write a file it would then refuse to open — reachable
+  at about 6,000 subscriptions with full metadata, well under the record cap
+  — and once that happened every command failed, including `remove` and
+  `opml-export`, the only two that could bring the library back under. A file
+  this writes can always be read back, which is also what makes the read-side
+  refusal mean what it says: that the file came from somewhere else.
 - **The state directory itself is checked for a symlink.** `O_NOFOLLOW` only
   refuses a link at the final component, and `makedirs(exist_ok=True)` walks
   into a linked directory without complaint — which would send every read and
@@ -328,7 +336,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (300 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (303 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
