@@ -21,6 +21,7 @@ import html
 import json
 import os
 import re
+import io
 import ipaddress
 import subprocess
 import sys
@@ -204,11 +205,16 @@ def read_bounded(path, max_bytes):
     ValueError for the caller to interpret."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        with os.fdopen(fd, "rb") as handle:
-            data = handle.read(max_bytes + 1)
+        handle = os.fdopen(fd, "rb")
     except BaseException:
+        # Only here does the descriptor still belong to us. Once fdopen has
+        # taken it, the wrapper owns it and closing it again would be a
+        # double close — which is not merely untidy: the number can have been
+        # reused by then, and the second close lands on someone else's file.
         os.close(fd)
         raise
+    with handle:
+        data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise StateTooLarge("larger than %d bytes" % max_bytes)
     return json.loads(data.decode("utf-8"))
@@ -1856,13 +1862,17 @@ def cmd_show_set(args):
 
 def cmd_opml_import(args):
     path = os.path.abspath(os.path.expanduser(args.path))
+    max_opml = 4 * 1024 * 1024
     try:
-        if os.path.getsize(path) > 4 * 1024 * 1024:
-            fail("that OPML file is too large")
-        if prolog_rejects(path):
-            fail("that OPML file declares a DTD and will not be read")
         with open(path, "rb") as handle:
-            tree = ET.parse(SanitizingReader(handle))
+            # Read one byte past the limit rather than trusting a stat that
+            # can disagree with what the read returns.
+            data = handle.read(max_opml + 1)
+        if len(data) > max_opml:
+            fail("that OPML file is larger than %d MB" % (max_opml // (1024 * 1024)))
+        if has_doctype(data[:PROLOG_WINDOW]):
+            fail("that OPML file declares a DTD and will not be read")
+        tree = ET.parse(SanitizingReader(io.BytesIO(data)))
     except OSError as exc:
         fail("cannot read %s: %s" % (path, exc.strerror))
     except ET.ParseError:

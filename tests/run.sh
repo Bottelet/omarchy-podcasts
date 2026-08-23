@@ -719,6 +719,43 @@ check "an OPML file with a DTD is refused" '.ok' 'false'
 run opml-import "$WORK/nope.opml"
 check "a missing OPML file is a clean error" '.ok' 'false'
 
+head -c 5000000 /dev/zero | tr '\0' 'x' > "$WORK/huge.opml"
+run opml-import "$WORK/huge.opml"
+check "an oversized OPML file is refused" '.error | test("larger than")' 'true'
+
+# A read that fails after the descriptor has been handed to a file object
+# must not close it twice — the number can be reused by then, and the second
+# close lands on someone else's file.
+while IFS=$'\t' read -r verdict name detail; do
+  [[ -z "${verdict:-}" ]] && continue
+  if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
+done < <(python3 - "$SCRIPT" <<'PYINNER'
+import importlib.util, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+
+before = len(os.listdir("/proc/self/fd"))
+kinds = set()
+for _ in range(200):
+    d = tempfile.mkdtemp()
+    try:
+        pc.read_bounded(d, 1000)          # opens, then read() fails
+    except Exception as exc:
+        kinds.add(type(exc).__name__)
+    os.rmdir(d)
+    try:
+        pc.read_bounded("/nonexistent-path-%d" % _, 1000)
+    except Exception as exc:
+        kinds.add(type(exc).__name__)
+after = len(os.listdir("/proc/self/fd"))
+print("PASS\tfailed reads leak no descriptors" if after <= before
+      else "FAIL\tfailed reads leak no descriptors\t%d -> %d" % (before, after))
+print("PASS\t…and report the real error, not a bad descriptor"
+      if "BadFileDescriptor" not in kinds and "OSError" not in kinds
+      else "FAIL\t…and report the real error, not a bad descriptor\t%s" % kinds)
+PYINNER
+)
+
 # Re-importing used to force a full refetch of every subscription, ignoring
 # their validators, and then throw the result away as "skipped".
 : > "$WORK/curl.log"

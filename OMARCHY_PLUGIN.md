@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 288-check offline suite with a stub curl |
+| `tests/` | 291-check offline suite with a stub curl |
 
 ## Technical
 
@@ -304,7 +304,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (288 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (291 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
