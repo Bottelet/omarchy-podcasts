@@ -158,6 +158,25 @@ def fail(message):
     emit({"ok": False, "error": str(message)})
 
 
+def read_state(path, what):
+    """Read a state file, distinguishing absent from unreadable.
+
+    load_json's "return the default on any error" is right for a cache and
+    catastrophic for state: every mutating command ends in a full rewrite, so
+    proceeding on a phantom empty value persists the loss. A missing file is
+    a first run and returns None; a file that exists but will not read, or
+    parses to the wrong shape, aborts the command instead."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError as exc:
+        fail("cannot read %s: %s" % (what, exc.strerror or exc))
+    except ValueError:
+        fail("%s is corrupt; leaving it alone rather than overwriting it" % what)
+
+
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -198,7 +217,12 @@ def load_shows():
     is written. A record with a usable feed URL is therefore given a correct
     id instead; only one with no feed at all is beyond saving, and losing a
     subscription is a great deal worse than carrying an odd one."""
-    shows = load_json(SHOWS_FILE, [])
+    shows = read_state(SHOWS_FILE, "your subscriptions file")
+    if shows is None:
+        return []
+    if not isinstance(shows, list):
+        fail("your subscriptions file is not a list; leaving it alone rather "
+             "than overwriting it")
     out = []
     seen = set()
     for show in shows:
@@ -234,7 +258,12 @@ DEFAULT_LIBRARY = {
 
 
 def load_library():
-    lib = load_json(LIBRARY_FILE, {})
+    lib = read_state(LIBRARY_FILE, "your queue file")
+    if lib is None:
+        lib = {}
+    if not isinstance(lib, dict):
+        fail("your queue file is not in the expected format; leaving it "
+             "alone rather than overwriting it")
     out = dict(DEFAULT_LIBRARY)
     out["queue"] = [str(x) for x in lib.get("queue", []) if isinstance(x, str)]
     out["triage"] = {k: v for k, v in (lib.get("triage") or {}).items()
@@ -746,7 +775,6 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
     depth = 0
     inside_item = 0
     channel = None
-    channel_depth = -1
 
     if prolog_rejects(path):
         return None, [], "that feed declares a DTD, which podcasts do not use"
@@ -810,12 +838,14 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
                     return None, [], "that feed is nested deeper than any real feed is"
                 if tag == "item":
                     inside_item += 1
-                elif tag == "channel" and channel is None:
+                elif tag == "channel" and not inside_item and (channel is None or not found):
+                    # Not inside an item (RDF nests one there), and a later
+                    # channel may still take over while nothing has been
+                    # recorded — an empty <channel/> placed first should not
+                    # shadow the real one.
                     channel = elem
-                    channel_depth = depth
                 continue
 
-            at_depth = depth
             depth -= 1
             if stack:
                 stack.pop()
@@ -1478,6 +1508,15 @@ def prune_triage(shows, lib):
     """Triage/position entries for episodes that have aged out of every feed
     are dead weight; drop them so state cannot grow without bound."""
     keep = {show["id"] for show in shows}
+    if not keep:
+        try:
+            # Belt for the above: an empty subscription list next to a
+            # non-empty shows.json means something went wrong upstream, and
+            # sweeping would destroy the last on-disk copy of the episodes.
+            if os.path.getsize(SHOWS_FILE) > 2:
+                return
+        except OSError:
+            return
     try:
         for name in os.listdir(EPISODE_DIR):
             if name.endswith(".json") and name[:-5] not in keep:
@@ -1610,9 +1649,6 @@ def cmd_show_set(args):
 
 
 # -------------------------------------------------------------------- opml
-
-OPML_ATTR_RE = re.compile(r'xmlUrl\s*=\s*"([^"]*)"', re.IGNORECASE)
-
 
 def cmd_opml_import(args):
     path = os.path.abspath(os.path.expanduser(args.path))

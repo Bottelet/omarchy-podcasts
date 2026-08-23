@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 233-check offline suite with a stub curl |
+| `tests/` | 243-check offline suite with a stub curl |
 
 ## Technical
 
@@ -206,6 +206,14 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
+- **A state file that will not read stops the command.** Returning a default
+  on any error is right for a cache and catastrophic for state: every
+  mutating command ends in a full rewrite, so proceeding on a phantom empty
+  subscription list persists the loss — and once an orphan sweep was added,
+  one unreadable `shows.json` destroyed the subscriptions, every episode file
+  and the whole queue, reporting `ok: true`. A missing file is a first run; a
+  file that exists but will not parse, or parses to the wrong shape, aborts
+  and is left untouched.
 - **A malformed record is repaired, not dropped.** Every mutating command
   ends in a full rewrite of `shows.json`, so a load that silently filters a
   bad record deletes that subscription for good the next time anything else
@@ -238,7 +246,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (233 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (243 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

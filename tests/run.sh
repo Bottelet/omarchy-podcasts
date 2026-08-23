@@ -209,6 +209,19 @@ _show, _items, _err = pc.parse_feed(_p, "abc123")
 _os.unlink(_p)
 expect("a container's title does not name the show", _show["title"], "The Real Show")
 
+# A decoy <channel>: RDF nests one inside <item>, and an empty one placed
+# first should not shadow the real one.
+_fd, _dc = tempfile.mkstemp(suffix=".xml")
+_os.write(_fd, b"""<?xml version="1.0"?><rss version="2.0"><channel/>
+<channel><item><channel><title>Decoy</title></channel>
+<title>E</title><enclosure url="https://e.example/a.mp3"/></item>
+<title>Real Show</title></channel></rss>""")
+_os.close(_fd)
+_decoyed, _ditems, _ = pc.parse_feed(_dc, "abc123")
+_os.unlink(_dc)
+expect("a decoy channel does not name the show", _decoyed["title"], "Real Show")
+expect("…and the real item still parses", len(_ditems), 1)
+
 _HEAD = ('<?xml version="1.0"?><rss version="2.0" '
          'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>')
 _ITEM = '<item><title>E</title><enclosure url="https://e.example/a.mp3"/></item>'
@@ -491,6 +504,48 @@ run library
 check "an ignored show contributes nothing to the inbox" '.inboxCount' '0'
 
 # ----------------------------------------------------------------- unsubscribe
+
+section "State files that will not read"
+# load_json returns its default on any error, which is right for a cache and
+# catastrophic for state: every mutating command ends in a full rewrite, so a
+# phantom empty subscription list gets persisted. With the orphan sweep added
+# later, one unreadable shows.json destroyed the subscriptions, every episode
+# file and the whole queue — and reported ok:true.
+cp "$OMARCHY_PODCASTS_DIR/shows.json" "$WORK/shows.bak"
+BEFORE_EPISODES="$(ls "$OMARCHY_PODCASTS_DIR/episodes" | wc -l)"
+
+printf '{"not":"a list"}' > "$OMARCHY_PODCASTS_DIR/shows.json"
+run refresh
+check "a wrongly-shaped subscriptions file stops the command" '.ok' 'false'
+run library
+check "…and every read of it too" '.ok' 'false'
+
+printf 'this is not json' > "$OMARCHY_PODCASTS_DIR/shows.json"
+run refresh
+check "a corrupt subscriptions file stops the command" '.ok' 'false'
+check "…and says so in words" '.error | test("corrupt")' 'true'
+
+chmod 000 "$OMARCHY_PODCASTS_DIR/shows.json"
+run refresh
+check "an unreadable subscriptions file stops the command" '.ok' 'false'
+chmod 600 "$OMARCHY_PODCASTS_DIR/shows.json"
+
+if [[ "$(ls "$OMARCHY_PODCASTS_DIR/episodes" | wc -l)" == "$BEFORE_EPISODES" ]]; then
+  ok "…and none of this deleted a single episode file"
+else
+  bad "…and none of this deleted a single episode file" \
+      "$BEFORE_EPISODES before, $(ls "$OMARCHY_PODCASTS_DIR/episodes" | wc -l) after"
+fi
+
+cp "$WORK/shows.bak" "$OMARCHY_PODCASTS_DIR/shows.json"
+run shows
+check "a restored file reads normally again" '.ok' 'true'
+
+# An absent file is a first run, not a fault.
+mv "$OMARCHY_PODCASTS_DIR/shows.json" "$WORK/shows.away"
+run shows
+check "an absent subscriptions file is simply empty" '.shows | length' '0'
+mv "$WORK/shows.away" "$OMARCHY_PODCASTS_DIR/shows.json"
 
 section "Unsubscribe"
 run queue add "$NEW_ID"
