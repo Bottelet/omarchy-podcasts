@@ -222,14 +222,23 @@ Panel {
     }
     if (tag === "add") {
       searching = false
-      searchNote = reply.note === "already subscribed"
-        ? "already subscribed to " + (reply.show ? reply.show.title : "that show")
-        : ""
-      // Clear the field itself, not just our copy of it — otherwise the box
-      // still reads "mostly technical" over a list of everything.
-      searchResults = []
-      lastSearched = ""
-      showsView.clearSearch()
+      var title = reply.show ? reply.show.title : "that show"
+      if (reply.note === "already subscribed") {
+        searchNote = "already subscribed to " + title
+      } else {
+        searchNote = ""
+        note("subscribed to " + title)
+      }
+      // Subscribing from a search result leaves the search alone on purpose:
+      // the row migrates out of "not subscribed" and up into your own shows,
+      // which is the clearest possible receipt that the click landed. A
+      // pasted URL has no such list to move within, and leaving the URL in
+      // the box would filter every show out — so that one clears.
+      if (addedFromUrl) {
+        searchResults = []
+        lastSearched = ""
+        showsView.clearSearch()
+      }
       cursor = 0
     } else if (tag === "opml-import") {
       note("imported " + reply.added + " show" + (reply.added === 1 ? "" : "s")
@@ -392,6 +401,7 @@ Panel {
     }
     if (Model.looksLikeUrl(text)) {
       searching = true
+      addedFromUrl = true
       actionProc.enqueue(Model.addCommand(root.scriptDir, text, false), "add")
       return
     }
@@ -479,9 +489,14 @@ Panel {
     searchDebounce.restart()
   }
 
+  // Whether the add in flight came from a pasted URL rather than a directory
+  // result — the two want different things to happen to the search box.
+  property bool addedFromUrl: false
+
   function subscribe(feedUrl) {
     searching = true
     searchNote = ""
+    addedFromUrl = false
     actionProc.enqueue(Model.addCommand(root.scriptDir, feedUrl, false), "add")
   }
 
