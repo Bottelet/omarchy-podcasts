@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 229-check offline suite with a stub curl |
+| `tests/` | 233-check offline suite with a stub curl |
 
 ## Technical
 
@@ -80,10 +80,15 @@ still let 1.9M *nested* elements reach **608 MB** — worse than the original,
 and returning success so nothing flagged it. What holds now:
 
 - every element is detached from its parent as it closes, not merely
-  cleared, with items exempt, and a channel child's own children exempt only
-  while that child holds fewer than 64 of them — exempting by *depth* let any
+  cleared, with items exempt, and a metadata element's own children exempt
+  while it holds fewer than 2,000 of them — exempting by *depth* let any
   container sitting at channel level keep every child it had, so 900,000 of
-  them under a `<foo>`, or padding a `<description>`, still cost ~95 MB;
+  them under a `<foo>`, or padding a `<description>`, still cost ~95 MB. That
+  bound is a truncation cliff, since dropping a parent's children destroys
+  their text, so it sits far beyond anything real: at 64 a `<description>`
+  written with inline markup fell from 255 characters to 5, silently, and
+  `plain_text` caps the result at 900 characters long before 2,000 children
+  is reached;
 - channel metadata is taken as text the moment each direct child closes, so
   nothing is retained to the end — keeping those elements around was itself
   87 MB when a feed put 400k junk elements at channel level;
@@ -233,7 +238,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (229 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (233 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

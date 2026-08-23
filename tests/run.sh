@@ -261,6 +261,23 @@ _os.unlink(_hj)
 expect("a sibling container cannot name the show", _hijacked["title"], "")
 expect("…nor choose the artwork we fetch", _hijacked["artwork"], "")
 expect("…and the real channel's item still parses", len(_hitems), 1)
+
+# Bounding a metadata element's children is a truncation cliff: del parent[:]
+# destroys the text of everything it removes. At 64 a description written
+# with inline markup fell from 255 characters to 5, silently. The bound has
+# to sit far beyond anything real — and plain_text's own 900-character cap
+# bites long before it.
+def _desc(n):
+    inner = "".join("<b>w%d</b> " % i for i in range(n))
+    return _parse("<title>S</title><description>start %s end</description>" % inner)["description"]
+
+expect("inline markup survives past the old bound", "end" in _desc(65), True)
+expect("…and well past it", len(_desc(200)) >= 800, True)
+expect("a padded image still yields its artwork",
+       _parse('<title>S</title><image><url>https://a/i.jpg</url>'
+              + "".join("<x%d/>" % i for i in range(100)) + '</image>')["artwork"],
+       "https://a/i.jpg")
+expect("the cliff is far beyond any real feed", pc.MAX_METADATA_CHILDREN >= 1000, True)
 expect("…and the episode still parses", len(_items), 1)
 expect("…and RSS image artwork is still found", _show["artwork"], "https://example.com/a.jpg")
 expect("numbers clamped", pc.clamp_number("9999999999", 0, 100, 5), 100)

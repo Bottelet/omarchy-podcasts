@@ -49,6 +49,14 @@ MAX_ELEMENTS = 2000000          # ceiling on total elements, junk included
 # that bounds it. Real feeds nest about six deep; sixty-four is room to
 # spare and still refuses 700,000.
 MAX_DEPTH = 64
+# How many children a metadata element may hold before its accumulated
+# content is dropped. This is a truncation cliff, so it has to sit far beyond
+# anything real: `del parent[:]` destroys the text of every child deleted, and
+# at 64 a <description> written with inline markup fell from 255 characters to
+# 5 — silently. Real descriptions have a handful of children, plain_text caps
+# the result at 900 characters anyway, and eleven metadata tags holding two
+# thousand small children each is a few megabytes at worst.
+MAX_METADATA_CHILDREN = 2000
 MAX_DESC_CHARS = 700
 MAX_CHAPTERS = 400
 ART_CACHE_BYTES = 50 * 1024 * 1024
@@ -838,12 +846,11 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
                 del channel[:]
                 continue
 
-            if parent is not None and parent.tag in WANTED and len(parent) <= 64:
-                # Its parent still has to read it. Bounded, because keying
-                # this on depth alone let any container sitting at channel
-                # level retain every one of its children: 900,000 of them
-                # under a <foo>, or padding a <description>, cost ~95 MB.
-                # A real <image> or <description> has a handful of children.
+            if parent is not None and parent.tag in WANTED and len(parent) <= MAX_METADATA_CHILDREN:
+                # Its parent still has to read it, so it stays whole. Only a
+                # metadata tag gets this — keying it on depth alone let any
+                # container sitting at channel level retain every child it
+                # had, and 900,000 of them under a <foo> cost ~95 MB.
                 continue
 
             # Anything else is filler: nested padding below a channel child,
