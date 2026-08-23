@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 272-check offline suite with a stub curl |
+| `tests/` | 281-check offline suite with a stub curl |
 
 ## Technical
 
@@ -223,6 +223,21 @@ Feed content is attacker-controlled and is handled that way:
   curl's for the answer to change. It also catches the obvious way around a
   check on the starting URL — a public host answering 301 to localhost —
   because the response is discarded before it is parsed, cached or shown.
+
+  Only *absolute* `Location` values are judged. A relative reference is
+  permitted there and is everywhere in practice; it has no hostname, and
+  treating that as unreachable rejected every ordinary redirect while
+  blaming the feed. It cannot change the host in any case, and the connected
+  address covers where the chain landed.
+
+  The one place the guarantee is dropped on purpose is behind an HTTP proxy.
+  curl honours `http_proxy` and friends, and through one `%{remote_ip}` is
+  the proxy's address rather than the origin's — usually 127.0.0.1, since
+  privoxy, mitmproxy and corporate MITM agents all sit on loopback. Judging
+  that would block every fetch a proxied user makes, so when a proxy is
+  configured the connected-address test is skipped and only the URL and hop
+  checks apply. A proxied request is already going somewhere this plugin
+  cannot see.
 - **No remote image loads.** Show and directory-result artwork is fetched by
   the helper (`art` subcommand), https-only, capped at 5 MB, with the file
   extension taken from sniffed magic bytes rather than the URL, then handed to
@@ -272,7 +287,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (272 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (281 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
