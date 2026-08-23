@@ -414,6 +414,28 @@ routes "{\"https://fine.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote
 run add "https://fine.example/feed.xml"
 check "an ordinary feed is unaffected" '.ok' 'true'
 
+# A relative Location is permitted by RFC 9110 and is everywhere in practice.
+# It has no hostname, and judging it like a URL rejected every ordinary
+# redirect — telling the user their feed was malicious.
+routes "{\"https://rel.example/feed\": {\"status\": 301, \"location\": \"/moved/feed.xml\"},
+         \"/moved/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"203.0.113.10\"}}"
+run add "https://rel.example/feed"
+check "an absolute-path redirect is followed" '.ok' 'true'
+
+routes "{\"https://rel2.example/feed\": {\"status\": 302, \"location\": \"feed.xml\"},
+         \"feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"203.0.113.10\"}}"
+run add "https://rel2.example/feed"
+check "…as is a bare relative one" '.ok' 'true'
+
+# A proxy makes remote_ip the proxy's address, and privoxy, mitmproxy and
+# corporate MITM agents all sit on loopback. Judging it would block
+# everything; the guarantee is dropped there rather than the plugin.
+routes "{\"https://proxied.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"127.0.0.1\"}}"
+run add "https://proxied.example/feed.xml"
+check "without a proxy, a loopback connection is refused" '.ok' 'false'
+OUT="$(http_proxy=http://127.0.0.1:8118 python3 "$SCRIPT" add -- "https://proxied.example/feed.xml" 2>/dev/null)"
+check "behind a proxy, the same fetch succeeds" '.ok' 'true'
+
 while IFS=$'\t' read -r verdict name detail; do
   [[ -z "${verdict:-}" ]] && continue
   if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
@@ -440,6 +462,13 @@ cases = [
     ("a mapped public address is still allowed", pc.address_blocked("::ffff:93.184.216.34"), False),
     ("IPv6 unique-local is still allowed", pc.address_blocked("fd00::1"), False),
     ("a public IPv6 address is allowed", pc.address_blocked("2606:4700::1111"), False),
+    # A transfer that succeeded without saying where it connected is unknown,
+    # not safe — the earlier bool() guard inverted exactly that case.
+    ("an unreported connection fails closed", pc.connected_blocked(""), True),
+    ("…as does an unparseable one", pc.connected_blocked("garbage"), True),
+    ("a relative Location is not a host change", pc.hop_blocked("/moved/feed.xml"), False),
+    ("…nor is a bare relative one", pc.hop_blocked("feed.xml"), False),
+    ("an absolute Location into loopback is", pc.hop_blocked("https://127.0.0.1/f.xml"), True),
     ("a LAN address is still allowed", pc.address_blocked("192.168.1.50"), False),
     ("…as is the 10/8 range", pc.address_blocked("10.0.0.4"), False),
     ("…and 172.16/12", pc.address_blocked("172.16.5.5"), False),

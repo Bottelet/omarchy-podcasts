@@ -421,6 +421,16 @@ def parse_date(raw):
 
 # --------------------------------------------------------------- fetching
 
+def blocked_address(address):
+    """Private LAN ranges are deliberately absent: a self-hosted podcast
+    server on 192.168.x, or its IPv6 unique-local equivalent, is a normal
+    thing to subscribe to. is_link_local covers the cloud metadata endpoint
+    at 169.254.169.254."""
+    return (address.is_loopback or address.is_link_local
+            or address.is_unspecified or address.is_multicast
+            or address.is_reserved)
+
+
 def unwrap_address(address):
     """An IPv6 address that is really an IPv4 one, unwrapped.
 
@@ -454,27 +464,58 @@ def address_blocked(text):
         address = unwrap_address(ipaddress.ip_address(text))
     except ValueError:
         return False          # a name; judged after the connection
-    # Private LAN ranges are deliberately allowed: a self-hosted podcast
-    # server on 192.168.x, or its IPv6 unique-local equivalent, is a normal
-    # thing to subscribe to. is_link_local covers the cloud metadata endpoint
-    # at 169.254.169.254.
-    return (address.is_loopback or address.is_link_local
-            or address.is_unspecified or address.is_multicast
-            or address.is_reserved)
+    return blocked_address(address)
 
 
 def url_blocked(url):
     try:
-        return address_blocked(urlsplit(str(url)).hostname)
+        host = urlsplit(str(url)).hostname
     except ValueError:
         return True
+    return address_blocked(host) if host else True
+
+
+def hop_blocked(location):
+    """A `Location` header value from a redirect.
+
+    Relative references are permitted there (RFC 9110 §10.2.2) and are
+    everywhere in practice — any `redirect('/feed')`, any nginx `rewrite`.
+    They have no hostname, so judging them like a URL rejected every ordinary
+    redirect and told the user their feed was malicious. A relative reference
+    cannot change the host anyway, and where the chain actually landed is
+    covered by the connected address."""
+    try:
+        host = urlsplit(str(location)).hostname
+    except ValueError:
+        return True
+    return bool(host) and address_blocked(host)
+
+
+PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy",
+              "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+
+
+def proxy_configured():
+    """curl honours these, and through a proxy `%{remote_ip}` is the proxy's
+    address rather than the origin's — usually 127.0.0.1, since privoxy,
+    mitmproxy and corporate MITM agents all sit on loopback. Judging that
+    address would block every single fetch."""
+    return any(os.environ.get(name, "").strip() for name in PROXY_VARS)
 
 
 def connected_blocked(remote_ip):
-    """True if curl connected to an address a feed must not reach. This is
-    what catches a name — `localhost`, or an attacker's host pointed at
-    127.0.0.1 — and a redirect chain that ends up there."""
-    return bool(remote_ip) and address_blocked(remote_ip)
+    """True if curl connected somewhere a feed must not reach. This is what
+    catches a name — `localhost`, or an attacker's host pointed at 127.0.0.1
+    — and a redirect chain that ends up there.
+
+    A transfer that succeeded without reporting an address is unknown, not
+    safe, so it fails closed."""
+    text = str(remote_ip or "").strip().strip("[]")
+    try:
+        address = unwrap_address(ipaddress.ip_address(text))
+    except ValueError:
+        return True
+    return blocked_address(address)
 
 
 # curl's exit codes, in the words a listener would use. Anything unmapped
@@ -640,7 +681,8 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     # so the response is discarded here rather than parsed, cached or shown.
     hops = [block["headers"].get("location", "") for block in blocks]
     hops.append(final_url)
-    if connected_blocked(remote_ip) or any(hop and url_blocked(hop) for hop in hops):
+    landed_badly = False if proxy_configured() else connected_blocked(remote_ip)
+    if landed_badly or any(hop and hop_blocked(hop) for hop in hops):
         cleanup(dest)
         return Fetched(0, "", url, "",
                        "that feed leads somewhere a feed may not reach")
