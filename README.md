@@ -153,7 +153,7 @@ Run the offline test suite yourself:
 tests/run.sh
 ```
 
-291 checks, no network — a stub curl serves fixtures and simulates redirects,
+297 checks, no network — a stub curl serves fixtures and simulates redirects,
 validators, and transport failures.
 
 ## Remove

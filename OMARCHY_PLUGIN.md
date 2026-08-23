@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 291-check offline suite with a stub curl |
+| `tests/` | 297-check offline suite with a stub curl |
 
 ## Technical
 
@@ -254,6 +254,23 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
+- **A cap refuses; it never truncates.** More subscriptions, queue entries or
+  triage records than the plugin will handle stops the command and leaves the
+  file alone. Truncating instead would delete the remainder the moment
+  anything else wrote — the same silent-loss shape as reading a broken file
+  as empty, with a higher threshold and a longer fuse.
+- **The state directory itself is checked for a symlink.** `O_NOFOLLOW` only
+  refuses a link at the final component, and `makedirs(exist_ok=True)` walks
+  into a linked directory without complaint — which would send every read and
+  write somewhere of the attacker's choosing and make the file-level check
+  irrelevant.
+- **A failed write leaves nothing behind.** The handler catches
+  `BaseException`, because `json.dump` raises `TypeError` on an object it
+  cannot serialise; its own `close()` is made non-raising, because on a full
+  disk that re-flushes and throws the same `ENOSPC`, which escaped the
+  handler before it reached the unlink. The sweep covers the write temps as a
+  backstop, in the state root and the episodes directory as well as the
+  download area.
 - **State files are read bounded and no-follow, and written through a name
   nobody can guess.** They live in a directory the user's own processes can
   write, so neither their size nor their type is ours to trust: reads use
@@ -304,7 +321,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (291 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (297 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

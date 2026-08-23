@@ -108,6 +108,14 @@ def ensure_dirs():
     # into each episode they are. 0700 across the board.
     os.umask(0o077)
     for path in (ROOT, EPISODE_DIR, ART_DIR, TMP_DIR):
+        # O_NOFOLLOW on a state file only refuses a link at the final
+        # component. A link at the directory itself sends every read and
+        # write somewhere else entirely, and makedirs(exist_ok=True) follows
+        # it without complaint — so refuse before creating anything.
+        if os.path.islink(path):
+            fail("%s is a symbolic link; refusing to read or write through it"
+                 % path)
+    for path in (ROOT, EPISODE_DIR, ART_DIR, TMP_DIR):
         try:
             os.makedirs(path, mode=0o700, exist_ok=True)
         except OSError as exc:
@@ -250,15 +258,22 @@ def save_json(path, obj):
         handle.close()
         handle = None
         os.replace(tmp, path)
-    except OSError as exc:
+    except BaseException as exc:
+        # BaseException, not OSError: json.dump raises TypeError on an object
+        # it cannot serialise, and that left the temp behind. The close is
+        # made non-raising because on a full disk it re-flushes and throws the
+        # same ENOSPC — which escaped this handler before reaching the unlink,
+        # leaking a temp on the one failure most likely to happen twice.
         if handle is not None:
-            handle.close()
-        if tmp:
             try:
-                os.unlink(tmp)
-            except OSError:
+                handle.close()
+            except BaseException:
                 pass
-        fail("cannot write %s: %s" % (os.path.basename(path), exc.strerror))
+        if tmp:
+            cleanup(tmp)
+        if isinstance(exc, OSError):
+            fail("cannot write %s: %s" % (os.path.basename(path), exc.strerror))
+        raise
 
 
 def load_shows():
@@ -278,9 +293,13 @@ def load_shows():
     if not isinstance(shows, list):
         fail("your subscriptions file is not a list; leaving it alone rather "
              "than overwriting it")
+    if len(shows) > MAX_SHOWS:
+        fail("your subscriptions file lists %d shows, more than the %d this "
+             "plugin will handle; leaving it alone rather than dropping the "
+             "rest" % (len(shows), MAX_SHOWS))
     out = []
     seen = set()
-    for show in shows[:MAX_SHOWS]:
+    for show in shows:
         if not isinstance(show, dict):
             continue
         feed = show.get("feed")
@@ -329,22 +348,31 @@ def load_library():
              "alone rather than overwriting it")
     out = dict(DEFAULT_LIBRARY)
     queue = lib.get("queue") or []
-    out["queue"] = [x for x in queue[:MAX_QUEUE]
-                    if isinstance(x, str) and ID_RE.match(x)]
+    triage = lib.get("triage") or {}
+    positions = lib.get("positions") or {}
+    # Same reasoning as the subscription cap: truncating here would be a
+    # silent deletion the next save persists.
+    for name, value, limit in (("queue", queue, MAX_QUEUE),
+                               ("triage", triage, MAX_TRIAGE),
+                               ("positions", positions, MAX_TRIAGE)):
+        if len(value) > limit:
+            fail("your queue file holds %d %s entries, more than the %d this "
+                 "plugin will handle; leaving it alone" % (len(value), name, limit))
+    out["queue"] = [x for x in queue if isinstance(x, str) and ID_RE.match(x)]
     out["triage"] = {}
-    for key, value in list((lib.get("triage") or {}).items())[:MAX_TRIAGE]:
+    for key, value in triage.items():
         if isinstance(key, str) and ID_RE.match(key) and value in (
                 "archived", "queued", "played"):
             out["triage"][key] = value
-    positions = {}
-    for key, val in list((lib.get("positions") or {}).items())[:MAX_TRIAGE]:
+    out_positions = {}
+    for key, val in positions.items():
         if isinstance(key, str) and ID_RE.match(key) and isinstance(val, dict):
-            positions[key] = {
+            out_positions[key] = {
                 "pos": clamp_number(val.get("pos"), 0, 1e7, 0),
                 "dur": clamp_number(val.get("dur"), 0, 1e7, 0),
                 "ts": clamp_number(val.get("ts"), 0, 4e12, 0),
             }
-    out["positions"] = positions
+    out["positions"] = out_positions
     now = lib.get("now")
     out["now"] = now if isinstance(now, str) and ID_RE.match(now) else None
     out["savedSeconds"] = clamp_number(lib.get("savedSeconds"), 0, 1e9, 0)
@@ -2143,19 +2171,24 @@ def main():
 
 
 def sweep_tmp():
-    """A killed run can leave a partial download behind; anything older than
-    an hour is nobody's."""
+    """A killed run can leave a partial download or a half-written state file
+    behind; anything older than an hour is nobody's."""
     cutoff = time.time() - 3600
-    try:
-        for name in os.listdir(TMP_DIR):
-            path = os.path.join(TMP_DIR, name)
+    for directory, prefix in ((TMP_DIR, ""), (ROOT, ".write-"),
+                              (EPISODE_DIR, ".write-")):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if prefix and not name.startswith(prefix):
+                continue
+            path = os.path.join(directory, name)
             try:
-                if os.stat(path).st_mtime < cutoff:
+                if os.path.isfile(path) and os.stat(path).st_mtime < cutoff:
                     cleanup(path)
             except OSError:
                 continue
-    except OSError:
-        pass
 
 
 if __name__ == "__main__":

@@ -661,6 +661,38 @@ run shows
 check "a symlink pre-placed at a state file is not followed" '.ok' 'false'
 rm -f "$OMARCHY_PODCASTS_DIR/shows.json"
 
+# A cap that truncates is a cap that deletes: the next command to end in a
+# full rewrite persists the shortened list.
+python3 -c "
+import json, os
+json.dump([{'id': '%012x' % i, 'feed': 'https://f%d.example/rss' % i}
+           for i in range(2005)],
+          open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json', 'w'))"
+run shows
+check "more subscriptions than the cap is refused, not truncated" '.ok' 'false'
+BEFORE_ROWS="$(python3 -c "
+import json, os
+print(len(json.load(open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json'))))")"
+if [[ "$BEFORE_ROWS" == "2005" ]]; then
+  ok "…and every one of them is still on disk"
+else
+  bad "…and every one of them is still on disk" "$BEFORE_ROWS remain"
+fi
+
+# O_NOFOLLOW only refuses a link at the final component; a link at the state
+# directory sends every read and write somewhere else, and makedirs follows
+# it without complaint.
+HIJACK="$WORK/hijack-target"
+mkdir -p "$HIJACK"
+ln -s "$HIJACK" "$WORK/hijack-link"
+OUT="$(OMARCHY_PODCASTS_DIR="$WORK/hijack-link" python3 "$SCRIPT" init 2>/dev/null)"
+check "a symlinked state directory is refused" '.ok' 'false'
+if [[ -z "$(ls -A "$HIJACK")" ]]; then
+  ok "…and nothing was written through it"
+else
+  bad "…and nothing was written through it" "$(ls -A "$HIJACK")"
+fi
+
 if [[ "$(ls "$OMARCHY_PODCASTS_DIR/episodes" | wc -l)" == "$BEFORE_EPISODES" ]]; then
   ok "…and none of this deleted a single episode file"
 else
@@ -680,6 +712,36 @@ if compgen -G "$OMARCHY_PODCASTS_DIR/*.tmp.*" > /dev/null; then
 else
   ok "writes leave no predictable temporary name"
 fi
+
+# A failed write must not leave its temp behind: nothing swept ROOT or
+# episodes/, so every failure was permanent litter in the state directory.
+while IFS=$'\t' read -r verdict name detail; do
+  [[ -z "${verdict:-}" ]] && continue
+  if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
+done < <(python3 - "$SCRIPT" "$OMARCHY_PODCASTS_DIR" <<'PYINNER'
+import glob, importlib.util, os, sys
+os.environ["OMARCHY_PODCASTS_DIR"] = sys.argv[2]
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+
+root = sys.argv[2]
+try:
+    pc.save_json(os.path.join(root, "probe.json"), {"x": object()})
+except BaseException:
+    pass
+left = glob.glob(os.path.join(root, ".write-*"))
+print("PASS\ta write that cannot serialise leaves no temp behind" if not left
+      else "FAIL\ta write that cannot serialise leaves no temp behind\t%s" % left)
+
+# And the sweep clears anything a killed run left.
+stale = os.path.join(root, ".write-stale.tmp")
+open(stale, "w").close()
+os.utime(stale, (0, 0))
+pc.sweep_tmp()
+print("PASS\t…and a stale one is swept" if not os.path.exists(stale)
+      else "FAIL\t…and a stale one is swept\tstill there")
+PYINNER
+)
 
 # An absent file is a first run, not a fault.
 mv "$OMARCHY_PODCASTS_DIR/shows.json" "$WORK/shows.away"
