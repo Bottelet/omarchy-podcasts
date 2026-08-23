@@ -168,6 +168,18 @@ expect("a bad id does not delete the subscription", len(_loaded), 2)
 expect("…it is repaired to a real one", pc.ID_RE.match(_loaded[0]["id"]) is not None, True)
 expect("…and the good record is untouched", _loaded[1]["id"], "6425ecf474e9")
 
+# Two records repaired from the same feed would share an id, and then an
+# episodes file, each overwriting the other every poll.
+_fd, _sp2 = tempfile.mkstemp(suffix=".json")
+_os.write(_fd, b'[{"id":"bad!","feed":"https://a.example/f.xml"},'
+               b'{"id":"worse/","feed":"https://a.example/f.xml"}]')
+_os.close(_fd)
+pc.SHOWS_FILE = _sp2
+_dup = pc.load_shows()
+pc.SHOWS_FILE = _real
+_os.unlink(_sp2)
+expect("a repair cannot collide two shows onto one id", len(_dup), 1)
+
 # Podcast Index credentials are pinned to an alphabet before they reach a
 # curl config line.
 expect("a normal credential is accepted", pc.CREDENTIAL_RE.match("AbC123_-xyz") is not None, True)

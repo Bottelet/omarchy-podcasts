@@ -192,6 +192,7 @@ def load_shows():
     subscription is a great deal worse than carrying an odd one."""
     shows = load_json(SHOWS_FILE, [])
     out = []
+    seen = set()
     for show in shows:
         if not isinstance(show, dict):
             continue
@@ -201,6 +202,12 @@ def load_shows():
         show_id = show.get("id")
         if not isinstance(show_id, str) or not ID_RE.match(show_id):
             show["id"] = show_id_for(feed)
+        # Two records repaired from the same feed would land on one id, and
+        # then on one episodes file — each overwriting the other's episodes
+        # every poll. First wins.
+        if show["id"] in seen:
+            continue
+        seen.add(show["id"])
         out.append(show)
     return out
 
