@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "bottelet.podcasts",
   "name": "Podcasts",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Casper Bottelet",
   "license": "MIT",
   "description": "A podcast client in the bar: an episode inbox you triage in seconds, a queue that plays itself through mpv with per-show speed and voice boost, chapters, and OPML import and export.",
