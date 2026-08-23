@@ -645,6 +645,22 @@ run refresh
 check "an unreadable subscriptions file stops the command" '.ok' 'false'
 chmod 600 "$OMARCHY_PODCASTS_DIR/shows.json"
 
+# State files sit where the user's own processes can write, so neither their
+# size nor their type is ours to trust.
+python3 -c "
+import json, os, sys
+json.dump([{'id': 'a' * 12, 'feed': 'https://x/' + 'p' * 900}] * 40000,
+          open(os.environ['OMARCHY_PODCASTS_DIR'] + '/shows.json', 'w'))"
+run shows
+check "an oversized subscriptions file is refused" '.ok' 'false'
+check "…and says it was the size, not corruption" '.error | test("larger than")' 'true'
+
+rm -f "$OMARCHY_PODCASTS_DIR/shows.json"
+ln -s /etc/passwd "$OMARCHY_PODCASTS_DIR/shows.json"
+run shows
+check "a symlink pre-placed at a state file is not followed" '.ok' 'false'
+rm -f "$OMARCHY_PODCASTS_DIR/shows.json"
+
 if [[ "$(ls "$OMARCHY_PODCASTS_DIR/episodes" | wc -l)" == "$BEFORE_EPISODES" ]]; then
   ok "…and none of this deleted a single episode file"
 else
@@ -655,6 +671,15 @@ fi
 cp "$WORK/shows.bak" "$OMARCHY_PODCASTS_DIR/shows.json"
 run shows
 check "a restored file reads normally again" '.ok' 'true'
+
+# The temporary name a write goes through must be one nobody could have
+# pre-placed a symlink at.
+run refresh
+if compgen -G "$OMARCHY_PODCASTS_DIR/*.tmp.*" > /dev/null; then
+  bad "writes leave no predictable temporary name" "$(ls "$OMARCHY_PODCASTS_DIR")"
+else
+  ok "writes leave no predictable temporary name"
+fi
 
 # An absent file is a first run, not a fault.
 mv "$OMARCHY_PODCASTS_DIR/shows.json" "$WORK/shows.away"

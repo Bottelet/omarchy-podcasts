@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 284-check offline suite with a stub curl |
+| `tests/` | 288-check offline suite with a stub curl |
 
 ## Technical
 
@@ -254,6 +254,16 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
+- **State files are read bounded and no-follow, and written through a name
+  nobody can guess.** They live in a directory the user's own processes can
+  write, so neither their size nor their type is ours to trust: reads use
+  `O_NOFOLLOW` (a symlink pre-placed at the path is refused, not followed)
+  and stop one byte past a cap, and records and string fields are capped
+  again after parsing. Writes go through `mkstemp`, which creates `O_EXCL` at
+  0600 under a name it chooses, before the atomic rename — the previous
+  target-plus-pid name was predictable enough for another process running as
+  the same user to drop a symlink there and redirect the truncation. Download
+  targets got the same treatment, since `curl -o` follows a symlink too.
 - **A state file that will not read stops the command.** Returning a default
   on any error is right for a cache and catastrophic for state: every
   mutating command ends in a full rewrite, so proceeding on a phantom empty
@@ -294,7 +304,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (284 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (288 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

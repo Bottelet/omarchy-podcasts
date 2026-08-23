@@ -24,6 +24,7 @@ import re
 import ipaddress
 import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -61,6 +62,13 @@ MAX_METADATA_CHILDREN = 2000
 MAX_DESC_CHARS = 700
 MAX_CHAPTERS = 400
 ART_CACHE_BYTES = 50 * 1024 * 1024
+# State files live where the user's own processes can write, so their size is
+# not ours to trust either. Generous next to what they really hold: a hundred
+# shows is a few hundred KB, and a hundred episodes about 120 KB.
+MAX_STATE_BYTES = 8 * 1024 * 1024
+MAX_SHOWS = 2000
+MAX_QUEUE = 10000
+MAX_TRIAGE = 100000
 STALE_AFTER_FAILURES = 4
 USER_AGENT = "omarchy-podcasts/1.0 (+https://omarchyplugins.com)"
 
@@ -159,7 +167,7 @@ def fail(message):
     emit({"ok": False, "error": str(message)})
 
 
-def read_state(path, what):
+def read_state(path, what, max_bytes=MAX_STATE_BYTES):
     """Read a state file, distinguishing absent from unreadable.
 
     load_json's "return the default on any error" is right for a cache and
@@ -167,44 +175,84 @@ def read_state(path, what):
     proceeding on a phantom empty value persists the loss. A missing file is
     a first run and returns None; a file that exists but will not read, or
     parses to the wrong shape, aborts the command instead."""
-    if not os.path.exists(path):
-        return None
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        return read_bounded(path, max_bytes)
+    except FileNotFoundError:
+        return None
     except OSError as exc:
         fail("cannot read %s: %s" % (what, exc.strerror or exc))
-    except ValueError:
+    except StateTooLarge:
+        fail("%s is larger than %d MB, which nothing this plugin writes ever "
+             "is; leaving it alone" % (what, max_bytes // (1024 * 1024)))
+    except (ValueError, UnicodeDecodeError):
         fail("%s is corrupt; leaving it alone rather than overwriting it" % what)
 
 
-def load_json(path, default):
+class StateTooLarge(ValueError):
+    """Distinguished from a parse error so the message can say which it was."""
+
+
+def read_bounded(path, max_bytes):
+    """Read a state file without following a symlink and without trusting its
+    size.
+
+    Both matter for files that live in a directory the user's own processes
+    can write. O_NOFOLLOW means a link pre-placed at the path is refused
+    rather than followed, and reading one byte past the cap turns "hand this
+    process an enormous file" into an error instead of the memory it asks
+    for. Returns None when the file is absent, and raises OSError or
+    ValueError for the caller to interpret."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except BaseException:
+        os.close(fd)
+        raise
+    if len(data) > max_bytes:
+        raise StateTooLarge("larger than %d bytes" % max_bytes)
+    return json.loads(data.decode("utf-8"))
+
+
+def load_json(path, default, max_bytes=MAX_STATE_BYTES):
+    """Cache-shaped read: anything unusable becomes the default, because the
+    caller can rebuild it. Bounded and no-follow all the same."""
+    try:
+        data = read_bounded(path, max_bytes)
+    except (OSError, ValueError, UnicodeDecodeError):
         return default
     return data if isinstance(data, type(default)) else default
 
 
 def save_json(path, obj):
-    tmp = path + ".tmp.%d" % os.getpid()
+    """Write through a fresh file nobody can have pre-placed, then rename.
+
+    The temporary name used to be the target plus this process's pid, created
+    with O_TRUNC. That is predictable, so another process running as the same
+    user could drop a symlink there first and have the truncation land on
+    whatever it pointed at. mkstemp creates with O_EXCL and O_CREAT at 0600
+    under a name it chooses, which is exactly the property that was missing."""
+    handle = None
+    tmp = ""
     try:
-        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
-                  "w", encoding="utf-8") as handle:
-            json.dump(obj, handle, separators=(",", ":"), ensure_ascii=False)
-            handle.flush()
-            os.fsync(handle.fileno())
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                                   prefix=".write-", suffix=".tmp")
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        json.dump(obj, handle, separators=(",", ":"), ensure_ascii=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        handle = None
         os.replace(tmp, path)
     except OSError as exc:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        if handle is not None:
+            handle.close()
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         fail("cannot write %s: %s" % (os.path.basename(path), exc.strerror))
-
-
-ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
 
 
 def load_shows():
@@ -226,12 +274,18 @@ def load_shows():
              "than overwriting it")
     out = []
     seen = set()
-    for show in shows:
+    for show in shows[:MAX_SHOWS]:
         if not isinstance(show, dict):
             continue
         feed = show.get("feed")
-        if not isinstance(feed, str) or not feed.strip():
+        if not isinstance(feed, str) or not feed.strip() or len(feed) > 2000:
             continue
+        # These reach the panel, so they are trimmed here as well as when
+        # they were parsed — nothing says the file has not been edited since.
+        for field, limit in (("title", 300), ("author", 200),
+                             ("description", 900), ("lastError", 200)):
+            if isinstance(show.get(field), str):
+                show[field] = show[field][:limit]
         show_id = show.get("id")
         if not isinstance(show_id, str) or not ID_RE.match(show_id):
             show["id"] = show_id_for(feed)
@@ -248,6 +302,8 @@ def load_shows():
 def save_shows(shows):
     save_json(SHOWS_FILE, shows)
 
+
+ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
 
 DEFAULT_LIBRARY = {
     "queue": [],        # ordered episode ids
@@ -266,12 +322,17 @@ def load_library():
         fail("your queue file is not in the expected format; leaving it "
              "alone rather than overwriting it")
     out = dict(DEFAULT_LIBRARY)
-    out["queue"] = [str(x) for x in lib.get("queue", []) if isinstance(x, str)]
-    out["triage"] = {k: v for k, v in (lib.get("triage") or {}).items()
-                     if isinstance(k, str) and v in ("archived", "queued", "played")}
+    queue = lib.get("queue") or []
+    out["queue"] = [x for x in queue[:MAX_QUEUE]
+                    if isinstance(x, str) and ID_RE.match(x)]
+    out["triage"] = {}
+    for key, value in list((lib.get("triage") or {}).items())[:MAX_TRIAGE]:
+        if isinstance(key, str) and ID_RE.match(key) and value in (
+                "archived", "queued", "played"):
+            out["triage"][key] = value
     positions = {}
-    for key, val in (lib.get("positions") or {}).items():
-        if isinstance(key, str) and isinstance(val, dict):
+    for key, val in list((lib.get("positions") or {}).items())[:MAX_TRIAGE]:
+        if isinstance(key, str) and ID_RE.match(key) and isinstance(val, dict):
             positions[key] = {
                 "pos": clamp_number(val.get("pos"), 0, 1e7, 0),
                 "dur": clamp_number(val.get("dur"), 0, 1e7, 0),
@@ -279,7 +340,7 @@ def load_library():
             }
     out["positions"] = positions
     now = lib.get("now")
-    out["now"] = now if isinstance(now, str) else None
+    out["now"] = now if isinstance(now, str) and ID_RE.match(now) else None
     out["savedSeconds"] = clamp_number(lib.get("savedSeconds"), 0, 1e9, 0)
     return out
 
@@ -294,7 +355,9 @@ def episodes_path(show_id):
 
 def load_episodes(show_id):
     data = load_json(episodes_path(show_id), [])
-    return [e for e in data if isinstance(e, dict) and e.get("id")]
+    return [e for e in data[:MAX_ITEMS_PER_FEED]
+            if isinstance(e, dict) and isinstance(e.get("id"), str)
+            and ID_RE.match(e["id"])]
 
 
 # --------------------------------------------------------------- helpers
@@ -606,7 +669,7 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         return Fetched(0, "", url, "", "that address is not one a feed may reach")
 
     protos = "http,https" if allow_http else "https"
-    header_dump = dest + ".hdr"
+    header_dump = tmp_path("hdr")
     argv = [
         "curl", "-sS",
         "--proto", "=" + protos,
@@ -731,7 +794,17 @@ def cleanup(*paths):
 
 
 def tmp_path(tag):
-    return os.path.join(TMP_DIR, "%s.%d.%d" % (tag, os.getpid(), int(time.time() * 1000) % 100000))
+    """A file only this process could have created.
+
+    curl's -o follows a symlink, so a predictable download target is the same
+    pre-placement problem as a predictable write target. mkstemp picks the
+    name and creates it O_EXCL at 0600."""
+    try:
+        fd, path = tempfile.mkstemp(dir=TMP_DIR, prefix=tag + "-")
+        os.close(fd)
+        return path
+    except OSError as exc:
+        fail("cannot create a temporary file: %s" % exc.strerror)
 
 
 def fetch_json(url, *, timeout=API_TIMEOUT, headers=None, post=None,
