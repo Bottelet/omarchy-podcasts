@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 205-check offline suite with a stub curl |
+| `tests/` | 219-check offline suite with a stub curl |
 
 ## Technical
 
@@ -72,15 +72,35 @@ parse has to stream. `xml.etree.ElementTree.iterparse` finishes that feed in
 nothing to install.
 
 Holding memory flat took more than the usual `clear()`, though — a claim
-made here before it was measured, and wrong. `clear()` empties an element but
-leaves it parented, so the channel's child list still grows for the length of
-the feed: 12 MB of junk elements peaked at **302 MB** of RSS. The parse now
-drops the accumulated children as well, which brings that to 22 MB, and caps
-total elements. Channel metadata can no longer be read off a fully-built
-`</channel>`, so each direct child is consumed as it closes — depth-gated,
-because feeds carry containers at channel level with their own `<title>`
-(Podcasting 2.0's `<podcast:liveItem>` is one, and it briefly named a real
-show after a live-stream announcement). A jq/xmlstarlet pipeline would have needed a
+made here before it was measured, and wrong twice over. `clear()` empties an
+element but leaves it parented, so a "cleared" subtree still costs a slot in
+its parent for the rest of the parse: 400k sibling elements peaked at
+**302 MB**, and a first fix that detached only items and channel children
+still let 1.9M *nested* elements reach **608 MB** — worse than the original,
+and returning success so nothing flagged it. What holds now:
+
+- every element is detached from its parent as it closes, not merely
+  cleared, with items and the direct children of `<channel>` exempt because
+  something still has to read them;
+- channel metadata is taken as text the moment each direct child closes, so
+  nothing is retained to the end — keeping those elements around was itself
+  87 MB when a feed put 400k junk elements at channel level;
+- a depth ceiling of 64, because a deeply nested document closes nothing
+  until the parser reaches the bottom, so no amount of care on the way out
+  bounds the descent.
+
+Every adversarial shape now sits at ~20 MB. Reading metadata per closing
+child is also why the parse is depth-gated: feeds carry containers at channel
+level with their own `<title>` (Podcasting 2.0's `<podcast:liveItem>` is one,
+and it briefly named a real show after a live-stream announcement).
+
+**Channel metadata is resolved by preference, not by order of appearance.**
+That distinction is not academic: Megaphone emits `<image>` before
+`<itunes:image>`, and RSS caps `<image>` at 144x400, so taking the first
+would hand thousands of shows a legacy logo in place of 3000x3000 artwork.
+Candidates are recorded under their namespaced tag and resolved afterwards —
+`itunes:image` over `image`, `description` over `itunes:summary`,
+`itunes:author` over `itunes:owner` over a bare `<author>`. A jq/xmlstarlet pipeline would have needed a
 dependency that is not on a stock Omarchy box. QML only ever sees the trimmed
 JSON the script prints — one object per call, `{ok: false, error}` on any
 failure, always exit 0.
@@ -175,6 +195,11 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
+- **A malformed record is repaired, not dropped.** Every mutating command
+  ends in a full rewrite of `shows.json`, so a load that silently filters a
+  bad record deletes that subscription for good the next time anything else
+  is written. A record with a usable feed URL gets a correct id instead; only
+  one with no feed at all is discarded.
 - **No credentials on argv or in logs.** `/proc/<pid>/cmdline` is
   world-readable on a stock Linux, so an argument is legible to every other
   account on the machine. The optional Podcast Index key and secret travel
@@ -182,17 +207,20 @@ Feed content is attacker-controlled and is handled that way:
   config file on stdin (`-K -`) rather than `-H`. They are pinned to
   `[A-Za-z0-9_-]{8,128}` before use, are sent only to api.podcastindex.org,
   and are never printed.
-- **The state lock is per-feed and bounded.** An OPML import takes the
-  writer lock once per feed rather than once for the import, so a five
-  hundred feed file does not lock out every poll and every click for its
-  duration; the wait is bounded at two minutes on top of that, so the worst
-  case is a retry rather than a spinner the user cannot clear.
+- **The state lock covers the write, not the fetch.** An OPML import fetches
+  each feed with no lock held and takes it only around the read-modify-write.
+  Holding it for the whole import made every poll and click wait for hours;
+  taking it per feed but keeping the fetch inside meant the importer held it
+  essentially continuously and re-took it faster than any waiter could win,
+  which at five hundred feeds still pushed a waiter past its deadline. The
+  wait is bounded at two minutes on top of that, so the worst case is a retry
+  rather than a spinner the user cannot clear.
 - **stdin has one occupant.** Passing a POST body and credentials on the same
   request would have curl read the body as a config file, where `output =` is
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (205 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (219 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

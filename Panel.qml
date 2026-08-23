@@ -729,6 +729,11 @@ Panel {
     if (!episode || !episode.url) return
     var opts = options || {}
 
+    // Before anything is mutated: with no runtime dir there is no player,
+    // and a half-applied state would leave a row rendering as current and
+    // the next savePosition writing an episode that never played as "now".
+    if (!ensurePlayer()) return
+
     if (currentId !== "" && currentId !== episode.id) savePosition(false)
 
     currentId = episode.id
@@ -743,10 +748,6 @@ Panel {
     playing = true
     playerError = ""
 
-    if (!ensurePlayer()) {
-      playing = false
-      return
-    }
     if (mpvSock.connected) sendLoad(episode.url)
     else pendingUrl = episode.url
 

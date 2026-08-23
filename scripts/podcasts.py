@@ -43,6 +43,12 @@ ART_TIMEOUT = 20
 MAX_ITEMS_PER_FEED = 100        # newest N kept per show
 MAX_ITEMS_SCANNED = 20000       # hard stop on absurd feeds
 MAX_ELEMENTS = 2000000          # ceiling on total elements, junk included
+# Detaching frees a subtree once it closes, but a deeply nested document
+# closes nothing until the parser reaches the bottom, so the whole descent is
+# resident whatever we do on the way out. A depth ceiling is the only thing
+# that bounds it. Real feeds nest about six deep; sixty-four is room to
+# spare and still refuses 700,000.
+MAX_DEPTH = 64
 MAX_DESC_CHARS = 700
 MAX_CHAPTERS = 400
 ART_CACHE_BYTES = 50 * 1024 * 1024
@@ -174,16 +180,29 @@ ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
 
 
 def load_shows():
-    """Subscriptions, with anything malformed dropped.
+    """Subscriptions, repaired rather than filtered.
 
-    Ids are hex digests we generated, and the only thing that ever becomes a
-    filename — so they are re-checked on the way in rather than trusted
-    because of where they came from."""
+    Ids are hex digests we generated and the only thing that ever becomes a
+    filename, so they are re-checked on the way in rather than trusted
+    because of where they came from. But every mutating command ends in
+    save_shows(), so a load that silently *drops* a record turns one bad
+    field into a permanently deleted subscription the moment anything else
+    is written. A record with a usable feed URL is therefore given a correct
+    id instead; only one with no feed at all is beyond saving, and losing a
+    subscription is a great deal worse than carrying an odd one."""
     shows = load_json(SHOWS_FILE, [])
-    return [s for s in shows
-            if isinstance(s, dict)
-            and isinstance(s.get("id"), str) and ID_RE.match(s["id"])
-            and isinstance(s.get("feed"), str) and s["feed"]]
+    out = []
+    for show in shows:
+        if not isinstance(show, dict):
+            continue
+        feed = show.get("feed")
+        if not isinstance(feed, str) or not feed.strip():
+            continue
+        show_id = show.get("id")
+        if not isinstance(show_id, str) or not ID_RE.match(show_id):
+            show["id"] = show_id_for(feed)
+        out.append(show)
+    return out
 
 
 def save_shows(shows):
@@ -468,6 +487,7 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
             # file — `output =` in an attacker-controlled body is an
             # arbitrary file write, and `url =` unwinds the protocol pinning.
             # No caller does this today; refuse rather than leave it loaded.
+            cleanup(header_dump)
             return Fetched(0, "", url, "",
                            "cannot send a body and credentials on the same request")
         argv += ["-X", "POST", "-H", "Content-Type: application/json",
@@ -482,8 +502,10 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout + 15)
     except subprocess.TimeoutExpired:
+        cleanup(header_dump)
         return Fetched(0, "", url, "", "timed out")
     except OSError as exc:
+        cleanup(header_dump)
         return Fetched(0, "", url, "", "curl unavailable: %s" % exc.strerror)
 
     out = proc.stdout.decode("utf-8", "replace").strip().split(" ", 1)
@@ -683,19 +705,31 @@ def text_of(elem):
 def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
     """Streaming RSS parse, in flat memory whatever the feed contains.
 
-    Both halves of that matter. `clear()` on a closing `<item>` empties the
-    element but leaves it parented, so the channel's child list still grows
-    for the length of the feed — a 12 MB feed of junk elements peaked at
-    302 MB before the child list was dropped too. And because channel-level
-    metadata can no longer be read off a fully-built `</channel>`, each of
-    its direct children is consumed as it closes instead.
+    Two things make that true, and both were learned the hard way.
+
+    `clear()` empties an element but leaves it parented, so a subtree that
+    has been "cleared" still costs a slot in its parent's child list for the
+    rest of the parse. Detaching from the parent is what actually frees it;
+    without that, a feed of 800k sibling elements peaked at 302 MB, and one
+    of 1.9M *nested* elements at 608 MB. Nothing may be detached while its
+    parent still has to be read, which is why items and the direct children
+    of `<channel>` are exempt.
+
+    Channel metadata is therefore collected as each direct child closes,
+    rather than off a fully-built `</channel>`. Order of appearance is not
+    the same thing as preference — Megaphone emits `<image>` before
+    `<itunes:image>`, and taking the first would hand thousands of shows a
+    144x400 RSS logo in place of 3000x3000 iTunes art — so candidates are
+    recorded by namespaced tag and resolved by preference at the end.
     """
     show = {"title": "", "author": "", "artwork": "", "description": "",
             "link": "", "newFeed": ""}
+    found = {}
     items = []
     scanned = 0
     elements = 0
     depth = 0
+    inside_item = 0
     channel = None
     channel_depth = -1
 
@@ -707,31 +741,42 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
     except OSError as exc:
         return None, [], "cannot read feed: %s" % exc.strerror
 
-    def take_channel_child(elem, tag):
-        """First value wins, so a feed cannot overwrite its own metadata by
-        repeating a tag further down.
+    ITUNES = "{%s}" % NS["itunes"]
 
-        Only ever called for a direct child of `<channel>`. That matters:
-        feeds carry containers at channel level that hold their own <title>
-        — Podcasting 2.0's `<podcast:liveItem>` and RSS's `<image>` both do —
-        and a scan that took the first <title> it saw anywhere would name the
-        show after a live-stream announcement."""
-        if tag == "title" and not show["title"]:
-            show["title"] = plain_text(text_of(elem), 300)
-        elif tag == "link" and not show["link"]:
-            show["link"] = valid_url(text_of(elem).strip(), True)
-        elif tag in ("description", "summary") and not show["description"]:
-            show["description"] = plain_text(text_of(elem), 900)
-        elif tag == "author" and not show["author"]:
-            show["author"] = plain_text(text_of(elem), 200)
-        elif tag == "owner" and not show["author"]:
-            show["author"] = plain_text(text_of(local(elem, "name", "itunes")), 200)
-        elif tag == "image" and not show["artwork"]:
-            # <itunes:image href="…"/> or RSS's <image><url>…</url></image>.
-            href = valid_url(str(elem.get("href", "")).strip())
-            show["artwork"] = href or valid_url(text_of(local(elem, "url")).strip())
-        elif tag == "new-feed-url" and not show["newFeed"]:
-            show["newFeed"] = valid_url(text_of(elem).strip())
+    # The only channel-level tags worth keeping. Anything else a feed puts
+    # there is dropped on sight rather than retained for the whole parse —
+    # 800,000 junk elements as direct children of <channel> cost 87 MB when
+    # they were kept.
+    WANTED = frozenset([
+        "title", "link", "description", "author", "image",
+        ITUNES + "image", ITUNES + "summary", ITUNES + "subtitle",
+        ITUNES + "author", ITUNES + "owner", ITUNES + "new-feed-url",
+    ])
+
+    def record(elem):
+        """Take what a direct child of <channel> is worth, as text, so that
+        nothing has to stay in the tree until the end. First occurrence wins
+        within a tag; preference *between* tags is resolved after the parse."""
+        tag = elem.tag
+        if tag not in WANTED or tag in found:
+            return
+        if tag == ITUNES + "image":
+            found[tag] = valid_url(str(elem.get("href", "")).strip())
+        elif tag == "image":
+            found[tag] = valid_url(text_of(local(elem, "url")).strip())
+        elif tag == ITUNES + "owner":
+            found[tag] = text_of(local(elem, "name", "itunes"))
+        else:
+            found[tag] = text_of(elem)
+
+    def text_for(*tags):
+        for tag in tags:
+            text = found.get(tag)
+            if text and text.strip():
+                return text
+        return ""
+
+    stack = []                    # open elements, innermost last
 
     try:
         parser = ET.iterparse(SanitizingReader(handle), events=("start", "end"))
@@ -739,20 +784,30 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
             tag = strip_ns(elem.tag)
 
             if event == "start":
+                stack.append(elem)
                 depth += 1
                 elements += 1
                 if elements > MAX_ELEMENTS:
                     handle.close()
                     return None, [], "that feed has more elements than any real feed has"
-                if tag == "channel" and channel is None:
+                if depth > MAX_DEPTH:
+                    handle.close()
+                    return None, [], "that feed is nested deeper than any real feed is"
+                if tag == "item":
+                    inside_item += 1
+                elif tag == "channel" and channel is None:
                     channel = elem
                     channel_depth = depth
                 continue
 
             at_depth = depth
             depth -= 1
+            if stack:
+                stack.pop()
+            parent = stack[-1] if stack else None
 
             if tag == "item":
+                inside_item = max(0, inside_item - 1)
                 scanned += 1
                 if scanned <= MAX_ITEMS_SCANNED:
                     parsed = parse_item(elem, show_id)
@@ -763,15 +818,27 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
                     del channel[:]
                 continue
 
-            if channel is None or at_depth != channel_depth + 1:
-                # Inside an item (parse_item reads those whole), inside some
-                # other container, or outside the channel entirely.
+            if inside_item:
+                continue          # parse_item reads these while they are whole
+
+            if channel is not None and at_depth == channel_depth + 1:
+                record(elem)
+                elem.clear()
+                del channel[:]
                 continue
 
-            take_channel_child(elem, tag)
+            if at_depth == channel_depth + 2:
+                continue          # a channel child still has to read this
+
+            # Anything else is filler: nested padding below a channel child,
+            # or an element outside the channel entirely. Emptying it is not
+            # enough — it stays in its parent's child list — so drop the
+            # parent's accumulated children too. Nothing still needed lives
+            # there: items are exempt above, and every channel child was
+            # recorded rather than left in the tree.
             elem.clear()
-            if len(channel) > 32:
-                del channel[:]
+            if parent is not None:
+                del parent[:]
     except ET.ParseError as exc:
         handle.close()
         if items:
@@ -782,6 +849,16 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
         handle.close()
         return None, [], "feed read failed: %s" % exc
     handle.close()
+
+    # Preference, not order of appearance — the old extraction's rules.
+    show["title"] = plain_text(text_for("title"), 300)
+    show["link"] = valid_url(text_for("link").strip(), True)
+    show["description"] = plain_text(
+        text_for("description", ITUNES + "summary", ITUNES + "subtitle"), 900)
+    show["author"] = plain_text(
+        text_for(ITUNES + "author", ITUNES + "owner", "author"), 200)
+    show["artwork"] = (found.get(ITUNES + "image") or found.get("image") or "")
+    show["newFeed"] = valid_url(text_for(ITUNES + "new-feed-url").strip())
 
     if not items and not show["title"]:
         return None, [], "no podcast feed found at that URL"
@@ -1258,7 +1335,11 @@ def search_podcastindex(term, key, secret):
 
 def add_feed(shows, feed_url, allow_http=False, mode="inbox"):
     """Subscribe + first fetch. Returns (show, error). Existing subscriptions
-    are returned as-is rather than re-fetched."""
+    are returned as-is rather than re-fetched.
+
+    Callers that hold the writer lock should note this fetches the network
+    while they hold it — fine for a single `add`, wrong for a bulk import,
+    which is why cmd_opml_import does the fetch itself outside the lock."""
     url = valid_url(feed_url, allow_http)
     if not url:
         return None, ("that URL is not https (add it as an http exception if you "
@@ -1519,20 +1600,34 @@ def cmd_opml_import(args):
 
     added, skipped, failed = 0, 0, []
     for url, title in feeds[:500]:
-        # The lock is taken per feed, not around the whole import: one fetch
-        # can take tens of seconds, and holding it for five hundred of them
-        # would block — or, now that the wait is bounded, fail — every poll
-        # and every click for the duration.
+        # Fetch first, without the lock. Taking it per feed was already
+        # better than holding it for the whole import, but the fetch inside
+        # it meant the importer held the lock essentially continuously and
+        # re-took it faster than any waiter could win — five hundred feeds
+        # would still push a concurrent poll past its deadline. The lock now
+        # covers only the read-modify-write.
+        candidate = valid_url(url)
+        if not candidate:
+            failed.append({"feed": str(url)[:120], "title": title,
+                           "error": "that URL is not https"})
+            continue
+        show_id = show_id_for(candidate)
+        prepared = default_show(candidate, show_id)
+        result = refresh_show(prepared, force=True)
+
         with Lock():
             shows = load_shows()
-            show, error = add_feed(shows, url)
-            if show is None:
-                failed.append({"feed": url[:120], "title": title, "error": error})
-            elif error == "already subscribed":
+            if find_show(shows, show_id):
                 skipped += 1
+            elif result["status"] == "error":
+                failed.append({"feed": candidate[:120], "title": title,
+                               "error": result.get("error", "could not read that feed")})
             else:
+                episodes = load_episodes(show_id)
+                prepared["baseline"] = max([e["pub"] for e in episodes] or [0])
+                shows.append(prepared)
                 added += 1
-            save_shows(shows)
+                save_shows(shows)
     emit({"ok": True, "added": added, "skipped": skipped,
           "failed": failed[:20], "failedCount": len(failed)})
 

@@ -150,6 +150,24 @@ expect("a hex id loads", pc.ID_RE.match("6425ecf474e9") is not None, True)
 expect("a traversing id does not", pc.ID_RE.match("../../etc/passwd") is not None, False)
 expect("a slashed id does not", pc.ID_RE.match("aa/bb") is not None, False)
 
+# Every mutating command ends in save_shows(), so a load that drops a record
+# deletes a subscription for good the next time anything is written. A bad id
+# is repaired; only a record with no feed at all is beyond saving.
+import tempfile, os as _os
+_fd, _sp = tempfile.mkstemp(suffix=".json")
+_os.write(_fd, b'[{"id":"../../etc/passwd","feed":"https://a.example/f.xml","title":"Kept"},'
+               b'{"id":"6425ecf474e9","feed":"https://b.example/f.xml","title":"Fine"},'
+               b'{"title":"No feed at all"}]')
+_os.close(_fd)
+_real = pc.SHOWS_FILE
+pc.SHOWS_FILE = _sp
+_loaded = pc.load_shows()
+pc.SHOWS_FILE = _real
+_os.unlink(_sp)
+expect("a bad id does not delete the subscription", len(_loaded), 2)
+expect("…it is repaired to a real one", pc.ID_RE.match(_loaded[0]["id"]) is not None, True)
+expect("…and the good record is untouched", _loaded[1]["id"], "6425ecf474e9")
+
 # Podcast Index credentials are pinned to an alphabet before they reach a
 # curl config line.
 expect("a normal credential is accepted", pc.CREDENTIAL_RE.match("AbC123_-xyz") is not None, True)
@@ -162,7 +180,6 @@ expect("XML attributes escaped", pc.xml_attr('a"b&c<d'), '"a&quot;b&amp;c&lt;d"'
 # carry containers at that level with their own <title> — Podcasting 2.0's
 # <podcast:liveItem> is one, and it named a real show after a live-stream
 # announcement until the parse was depth-gated.
-import tempfile, os as _os
 _fd, _p = tempfile.mkstemp(suffix=".xml")
 _os.write(_fd, b"""<?xml version="1.0"?>
 <rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
@@ -179,6 +196,42 @@ _os.close(_fd)
 _show, _items, _err = pc.parse_feed(_p, "abc123")
 _os.unlink(_p)
 expect("a container's title does not name the show", _show["title"], "The Real Show")
+
+_HEAD = ('<?xml version="1.0"?><rss version="2.0" '
+         'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>')
+_ITEM = '<item><title>E</title><enclosure url="https://e.example/a.mp3"/></item>'
+
+def _parse(body):
+    fd, path = tempfile.mkstemp(suffix=".xml")
+    _os.write(fd, (_HEAD + body + _ITEM + "</channel></rss>").encode())
+    _os.close(fd)
+    try:
+        show, items, err = pc.parse_feed(path, "abc123")
+        return show or {}
+    finally:
+        _os.unlink(path)
+
+# Order of appearance is not preference: real feeds put the legacy tag first.
+expect("itunes:image beats a preceding RSS image",
+       _parse('<title>S</title><image><url>https://a/small.jpg</url></image>'
+              '<itunes:image href="https://a/big.jpg"/>')["artwork"], "https://a/big.jpg")
+expect("RSS image is still used alone",
+       _parse('<title>S</title><image><url>https://a/small.jpg</url></image>')["artwork"],
+       "https://a/small.jpg")
+expect("description beats a preceding itunes:summary",
+       _parse('<title>S</title><itunes:summary>SUM</itunes:summary>'
+              '<description>REAL</description>')["description"], "REAL")
+expect("itunes:summary is still used alone",
+       _parse('<title>S</title><itunes:summary>SUM</itunes:summary>')["description"], "SUM")
+expect("itunes:author beats a preceding bare author",
+       _parse('<title>S</title><author>webmaster@a.example</author>'
+              '<itunes:author>Real Host</itunes:author>')["author"], "Real Host")
+expect("itunes:owner fills in for a missing itunes:author",
+       _parse('<title>S</title><itunes:owner><itunes:name>Owner</itunes:name>'
+              '</itunes:owner>')["author"], "Owner")
+expect("a bare author is a last resort",
+       _parse('<title>S</title><author>webmaster@a.example</author>')["author"],
+       "webmaster@a.example")
 expect("…and the episode still parses", len(_items), 1)
 expect("…and RSS image artwork is still found", _show["artwork"], "https://example.com/a.jpg")
 expect("numbers clamped", pc.clamp_number("9999999999", 0, 100, 5), 100)
@@ -466,41 +519,53 @@ check "search works with no credentials at all" '.source' 'itunes'
 # ------------------------------------------------------------------ artwork
 
 section "Parser memory"
-# clear() empties an item but leaves it parented, so the channel's child list
-# grew for the length of the feed: 12 MB of junk elements peaked at 302 MB
-# before the child list was dropped as well.
+# clear() leaves an element parented, so a "cleared" subtree still costs a
+# slot in its parent for the rest of the parse. Sibling floods peaked at
+# 302 MB and nested ones at 608 MB before parents were detached too and a
+# depth ceiling was added. Every shape below is an adversarial feed under
+# the 15 MB download cap.
 while read -r key value; do
   case "$key" in
-    junk-bounded) [[ $value == True ]] && ok "a feed of junk elements does not blow memory" || bad "a feed of junk elements does not blow memory" ;;
-    junk-refused) [[ $value == True ]] && ok "…and an absurd element count is refused outright" || bad "…and an absurd element count is refused outright" ;;
-    real-parsed)  [[ $value == True ]] && ok "…while a normal feed still parses in full" || bad "…while a normal feed still parses in full" ;;
+    siblings)   [[ $value == True ]] && ok "a flood of sibling elements stays flat" || bad "a flood of sibling elements stays flat" ;;
+    outside)    [[ $value == True ]] && ok "…as does one outside the channel" || bad "…as does one outside the channel" ;;
+    items)      [[ $value == True ]] && ok "…and a flood of items" || bad "…and a flood of items" ;;
+    deep)       [[ $value == True ]] && ok "deep nesting is refused rather than absorbed" || bad "deep nesting is refused rather than absorbed" ;;
+    contained)  [[ $value == True ]] && ok "…including nesting inside a container" || bad "…including nesting inside a container" ;;
+    elements)   [[ $value == True ]] && ok "an absurd element count is refused" || bad "an absurd element count is refused" ;;
+    real)       [[ $value == True ]] && ok "…while a normal feed still parses in full" || bad "…while a normal feed still parses in full" ;;
   esac
 done < <(python3 - "$SCRIPT" "$WORK" "$HERE" <<'PYINNER'
 import importlib.util, os, resource, sys
 spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
 pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
-
 work, here = sys.argv[2], sys.argv[3]
-junk = os.path.join(work, "junk.xml")
-with open(junk, "wb") as h:
-    h.write(b'<?xml version="1.0"?><rss><channel><title>t</title>')
-    h.write(b"<a/>" * 800000)
-    h.write(b"</channel></rss>")
-base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-pc.parse_feed(junk, "abc123")
-grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base) / 1024.0
-print("junk-bounded", grew < 120)
 
-huge = os.path.join(work, "huge.xml")
-with open(huge, "wb") as h:
-    h.write(b'<?xml version="1.0"?><rss><channel><title>t</title>')
-    h.write(b"<a/>" * (pc.MAX_ELEMENTS + 10))
-    h.write(b"</channel></rss>")
-_show, _items, err = pc.parse_feed(huge, "abc123")
-print("junk-refused", "elements" in (err or ""))
+def run(name, body):
+    path = os.path.join(work, "shape-%s.xml" % name)
+    with open(path, "wb") as h:
+        h.write(b'<?xml version="1.0"?>' + body)
+    base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    show, items, err = pc.parse_feed(path, "abc123")
+    grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base) / 1024.0
+    os.unlink(path)
+    return grew, err
+
+CH = b'<rss><channel><title>t</title>'
+grew, err = run("siblings", CH + b"<a/>" * 400000 + b"</channel></rss>")
+print("siblings", grew < 100)
+grew, err = run("outside", b'<rss>' + b"<a/>" * 400000 + b'<channel><title>t</title></channel></rss>')
+print("outside", grew < 100)
+grew, err = run("items", CH + b"<item><title>e</title></item>" * 200000 + b"</channel></rss>")
+print("items", grew < 100)
+grew, err = run("deep", CH + b"<a>" * 300000 + b"</a>" * 300000 + b"</channel></rss>")
+print("deep", "nested" in (err or "") and grew < 100)
+grew, err = run("contained", CH + b"<box>" + b"<a>" * 200000 + b"</a>" * 200000 + b"</box></channel></rss>")
+print("contained", "nested" in (err or "") and grew < 100)
+grew, err = run("elements", CH + b"<a/>" * (pc.MAX_ELEMENTS + 10) + b"</channel></rss>")
+print("elements", "elements" in (err or ""))
 
 show, items, err = pc.parse_feed(os.path.join(here, "fixtures", "full.xml"), "abc123")
-print("real-parsed", err == "" and show["title"] == "Test Show" and len(items) == 6)
+print("real", err == "" and show["title"] == "Test Show" and len(items) == 6)
 PYINNER
 )
 
