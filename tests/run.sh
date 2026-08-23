@@ -1011,6 +1011,76 @@ print("real", err == "" and show["title"] == "Test Show" and len(items) == 6)
 PYINNER
 )
 
+section "Where the caps bite"
+# An off-by-one here goes wrong in both directions: refusing at the cap on
+# write while accepting it on read blocks the last legitimate subscription,
+# and the reverse lets the plugin write a file it then cannot open — after
+# which every command fails, including the ones that would undo it.
+while IFS=$'\t' read -r verdict name detail; do
+  [[ -z "${verdict:-}" ]] && continue
+  if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
+done < <(python3 - "$SCRIPT" "$WORK/edge" <<'PYINNER'
+import contextlib, importlib.util, io, json, os, sys
+os.environ["OMARCHY_PODCASTS_DIR"] = sys.argv[2]
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+pc.ensure_dirs()
+
+def quiet(fn):
+    """(completed, value, output). save_json returns None on success, so the
+    return value cannot stand in for whether it worked — only whether fail()
+    exited can."""
+    noise = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(noise):
+            return True, fn(), noise.getvalue()
+    except SystemExit:
+        return False, None, noise.getvalue()
+
+def payload(target):
+    rows, blob, i = [], "[]", 0
+    while len(blob.encode()) < target:
+        rows.append({"id": "%012x" % i, "feed": "https://f%d.example/rss" % i,
+                     "description": "D" * 900})
+        blob = json.dumps(rows, separators=(",", ":"), ensure_ascii=False)
+        i += 1
+    rows.pop()
+    blob = json.dumps(rows, separators=(",", ":"), ensure_ascii=False)
+    pad = target - len(blob.encode())
+    if pad > 0 and rows:
+        rows[-1]["description"] += "x" * pad
+    return rows
+
+def emit(name, condition, detail=""):
+    print(("PASS\t%s" % name) if condition else ("FAIL\t%s\t%s" % (name, detail)))
+
+exact = payload(pc.MAX_STATE_BYTES)
+wrote, _, _ = quiet(lambda: pc.save_json(pc.SHOWS_FILE, exact))
+emit("a file exactly at the byte cap is written", wrote)
+read, loaded, _ = quiet(pc.load_shows)
+emit("…and read straight back", read and len(loaded) == len(exact),
+     "got %r" % (None if not read else len(loaded)))
+
+wrote, _, _ = quiet(lambda: pc.save_json(pc.SHOWS_FILE, payload(pc.MAX_STATE_BYTES + 1)))
+emit("…while one byte more is refused", not wrote)
+
+rows = lambda n: [{"id": "%012x" % i, "feed": "https://f%d.example/rss" % i}
+                  for i in range(n)]
+_, result, out = quiet(lambda: pc.add_feed(rows(pc.MAX_SHOWS - 1), "https://new.example/rss"))
+under = (result[1] if result else "") or ""
+emit("the last subscription under the cap is allowed",
+     "as many as" not in under and "as many as" not in out, under[:80])
+_, result, _ = quiet(lambda: pc.add_feed(rows(pc.MAX_SHOWS), "https://new.example/rss"))
+emit("…and the one past it is refused",
+     result is not None and result[0] is None and "as many as" in (result[1] or ""))
+
+wrote, _, _ = quiet(lambda: pc.save_json(pc.SHOWS_FILE, rows(pc.MAX_SHOWS)))
+read, loaded, _ = quiet(pc.load_shows)
+emit("a library exactly at the record cap is not locked out",
+     wrote and read and len(loaded) == pc.MAX_SHOWS)
+PYINNER
+)
+
 section "Artwork cache"
 while read -r key value; do
   case "$key" in
