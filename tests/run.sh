@@ -380,6 +380,67 @@ run queue remove -- "-x"
 
 # ----------------------------------------------------------- conditional GET
 
+section "Addresses a feed may not reach"
+# A feed can point its artwork, chapters or its own URL at something only
+# this machine can reach. Loopback and link-local (which includes the cloud
+# metadata endpoint) are refused; private LAN ranges are deliberately not,
+# because a self-hosted podcast server is a normal thing to subscribe to.
+run add "https://127.0.0.1/feed.xml"
+check "loopback is refused" '.error | test("may reach")' 'true'
+run add "https://[::1]/feed.xml"
+check "IPv6 loopback is refused" '.error | test("may reach")' 'true'
+run add "https://169.254.169.254/feed.xml"
+check "the metadata endpoint is refused" '.error | test("may reach")' 'true'
+run chapters "https://127.0.0.1/chapters.json"
+check "…and chapters cannot reach it either" '.error | test("may reach")' 'true'
+
+# A name is judged by the address curl actually connected to, so a host
+# pointed at loopback is caught after the fetch rather than before it.
+routes "{\"https://sneaky.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"127.0.0.1\"}}"
+run add "https://sneaky.example/feed.xml"
+check "a name pointed at loopback is refused" '.error | test("may not reach")' 'true'
+
+routes "{\"https://sneaky.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"169.254.169.254\"}}"
+run add "https://sneaky.example/feed.xml"
+check "…as is one pointed at the metadata endpoint" '.error | test("may not reach")' 'true'
+
+# The obvious way around a check on the starting URL: answer 301 to it.
+routes "{\"https://redirector.example/feed.xml\": {\"status\": 301, \"location\": \"https://127.0.0.1/feed.xml\"}}"
+run add "https://redirector.example/feed.xml"
+check "a redirect into loopback is refused" '.error | test("may not reach")' 'true'
+
+# And a perfectly ordinary feed is still fetched.
+routes "{\"https://fine.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"203.0.113.10\"}}"
+run add "https://fine.example/feed.xml"
+check "an ordinary feed is unaffected" '.ok' 'true'
+
+while IFS=$'\t' read -r verdict name detail; do
+  [[ -z "${verdict:-}" ]] && continue
+  if [[ "$verdict" == "PASS" ]]; then ok "$name"; else bad "$name" "$detail"; fi
+done < <(python3 - "$SCRIPT" <<'PYINNER'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+cases = [
+    ("a name is judged after the connection, not before",
+     pc.address_blocked("localhost"), False),
+    ("…and the connected address decides", pc.connected_blocked("127.0.0.1"), True),
+    ("…including the metadata endpoint", pc.connected_blocked("169.254.169.254"), True),
+    ("…while a public one is fine", pc.connected_blocked("93.184.216.34"), False),
+    ("a LAN address is still allowed", pc.address_blocked("192.168.1.50"), False),
+    ("…as is the 10/8 range", pc.address_blocked("10.0.0.4"), False),
+    ("…and 172.16/12", pc.address_blocked("172.16.5.5"), False),
+    ("a public address is allowed", pc.address_blocked("93.184.216.34"), False),
+    ("0.0.0.0 is refused", pc.address_blocked("0.0.0.0"), True),
+    ("an empty host is refused", pc.address_blocked(""), True),
+    ("an unknown name is left to curl", pc.address_blocked("no-such-host.invalid"), False),
+]
+for name, got, want in cases:
+    print(("PASS" if got == want else "FAIL") + "\t" + name + "\t" +
+          ("" if got == want else "want %r got %r" % (want, got)))
+PYINNER
+)
+
 section "Polling"
 routes "{\"$FEED\": {\"fixture\": \"full.xml\", \"etag\": \"\\\"v1\\\"\"}}"
 run refresh --show "$SHOW_ID"

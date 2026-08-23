@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 243-check offline suite with a stub curl |
+| `tests/` | 262-check offline suite with a stub curl |
 
 ## Technical
 
@@ -197,6 +197,25 @@ Feed content is attacker-controlled and is handled that way:
   response, 100 newest episodes kept per show, 700 characters of episode
   notes, 400 chapters, 50 MB LRU artwork cache. Timeouts on every request and
   no retries.
+- **A feed cannot send us somewhere only this machine can reach.** Loopback,
+  link-local (which includes the cloud metadata endpoint at 169.254.169.254)
+  and the unspecified address are refused on every feed-controlled URL —
+  the feed itself, artwork, and `podcast:chapters`, whose titles render back
+  into the panel and would otherwise be a read primitive against an internal
+  service. Private LAN ranges are deliberately *not* blocked: a self-hosted
+  podcast server on 192.168.x is a normal thing to subscribe to, and refusing
+  it would break a real use case to close a hole loopback already accounts
+  for.
+
+  Literal addresses are refused before anything leaves the machine. Names are
+  judged afterwards, on `%{remote_ip}` — the address curl actually connected
+  to — rather than by resolving them ourselves. That is both faster (our own
+  lookup stalled for the full resolver timeout on a host that does not
+  resolve, which would hang the plugin on a flaky network before curl even
+  started) and more accurate, since there is no window between our lookup and
+  curl's for the answer to change. It also catches the obvious way around a
+  check on the starting URL — a public host answering 301 to localhost —
+  because the response is discarded before it is parsed, cached or shown.
 - **No remote image loads.** Show and directory-result artwork is fetched by
   the helper (`art` subcommand), https-only, capped at 5 MB, with the file
   extension taken from sniffed magic bytes rather than the URL, then handed to
@@ -246,7 +265,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (243 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (262 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
@@ -262,12 +281,8 @@ counter.
 
 Deliberate, with reasons, so the next reader does not re-litigate them:
 
-- **A feed URL may point at a private or loopback address.** Blocking them
-  would break self-hosted feeds on a LAN, which is a normal thing to want.
-  The exposure is a GET whose body is parsed as XML with errors swallowed,
-  and there is no channel that sends the result anywhere. A related gap is
-  worth knowing about: a 301 or `itunes:new-feed-url` repoints a live
-  subscription silently, keeping the show id and saying nothing in the UI.
+- **A 301 or `itunes:new-feed-url` repoints a live subscription silently**,
+  keeping the show id and saying nothing in the UI.
 - **`show.allowHttp` has no interface.** Feeds must be HTTPS and there is
   currently no way for a user to grant a per-feed exception, so the error
   text that offers one is aspirational. Enclosure URLs are the exception:

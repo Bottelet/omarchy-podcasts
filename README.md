@@ -132,6 +132,11 @@ without it.
   and for search results alike — is downloaded by the helper, size-capped and
   type-checked from its magic bytes, and cached to disk first. A directory API
   cannot make your machine reach out to a host of its choosing.
+- A feed cannot point the plugin at your own machine. Loopback and
+  link-local addresses are refused on every URL a feed controls — its own,
+  its artwork, its chapters — so a podcast cannot use your computer to reach
+  a service only your computer can see. Feeds on your LAN still work, because
+  self-hosting one is a reasonable thing to do.
 - Feeds must be HTTPS. A feed that declares a DTD is refused outright (the
   billion-laughs amplification no download cap can catch). Downloads are
   capped — 15 MB per feed, 5 MB per artwork — with timeouts and no retry
@@ -148,7 +153,7 @@ Run the offline test suite yourself:
 tests/run.sh
 ```
 
-243 checks, no network — a stub curl serves fixtures and simulates redirects,
+262 checks, no network — a stub curl serves fixtures and simulates redirects,
 validators, and transport failures.
 
 ## Remove

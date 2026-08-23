@@ -21,6 +21,7 @@ import html
 import json
 import os
 import re
+import ipaddress
 import subprocess
 import sys
 import time
@@ -420,6 +421,55 @@ def parse_date(raw):
 
 # --------------------------------------------------------------- fetching
 
+# Addresses a feed has no business sending us to. Private LAN ranges are
+# deliberately NOT here: a self-hosted podcast server on 192.168.x is a normal
+# thing to subscribe to, and refusing it would break a real use case to close
+# a hole that loopback and link-local already account for. Link-local covers
+# the cloud metadata endpoint at 169.254.169.254.
+BLOCKED_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("fe80::/10"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::/128"),
+)
+
+def address_blocked(text):
+    """True if `text` is a literal address a feed must not send us to.
+
+    Names are not resolved here on purpose. Doing our own DNS meant a lookup
+    before every fetch — which stalls for the full resolver timeout on a host
+    that does not resolve, and would have the plugin hanging on a flaky
+    network before curl even started. curl resolves anyway, and reports the
+    address it actually connected to, so the name case is caught after the
+    fetch by `connected_blocked` instead. That is also strictly more accurate:
+    it is the address really used, with no window between our lookup and
+    curl's for the answer to change."""
+    text = str(text or "").strip().strip("[]")
+    if not text:
+        return True
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False          # a name; judged after the connection
+    return any(address in network for network in BLOCKED_NETWORKS)
+
+
+def url_blocked(url):
+    try:
+        return address_blocked(urlsplit(str(url)).hostname)
+    except ValueError:
+        return True
+
+
+def connected_blocked(remote_ip):
+    """True if curl connected to an address a feed must not reach. This is
+    what catches a name — `localhost`, or an attacker's host pointed at
+    127.0.0.1 — and a redirect chain that ends up there."""
+    return bool(remote_ip) and address_blocked(remote_ip)
+
+
 # curl's exit codes, in the words a listener would use. Anything unmapped
 # falls through to curl's own last stderr line.
 CURL_ERRORS = {
@@ -488,6 +538,8 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     stay on the command line."""
     if not valid_url(url, allow_http):
         return Fetched(0, "", url, "", "unsupported url")
+    if url_blocked(url):
+        return Fetched(0, "", url, "", "that address is not one a feed may reach")
 
     protos = "http,https" if allow_http else "https"
     header_dump = dest + ".hdr"
@@ -503,7 +555,7 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         "-A", USER_AGENT,
         "-D", header_dump,
         "-o", dest,
-        "-w", "%{http_code} %{url_effective}",
+        "-w", "%{http_code} %{remote_ip} %{url_effective}",
     ]
     for name, value in (headers or {}).items():
         # Header values come from the server's own previous ETag; refuse
@@ -552,9 +604,10 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         cleanup(header_dump)
         return Fetched(0, "", url, "", "curl unavailable: %s" % exc.strerror)
 
-    out = proc.stdout.decode("utf-8", "replace").strip().split(" ", 1)
+    out = proc.stdout.decode("utf-8", "replace").strip().split(" ", 2)
     status = int(out[0]) if out and out[0].isdigit() else 0
-    final_url = out[1] if len(out) > 1 else url
+    remote_ip = out[1] if len(out) > 1 else ""
+    final_url = out[2] if len(out) > 2 else url
 
     # curl reports the status line even when it then aborts the transfer —
     # --max-filesize on a chunked response leaves a truncated body next to a
@@ -573,6 +626,17 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     blocks, permanent = parse_header_dump(header_dump)
     cleanup(header_dump)
     final_headers = blocks[-1]["headers"] if blocks else {}
+
+    # Where curl actually ended up. This is what catches a name pointed at
+    # loopback, and the obvious way around the pre-check — a feed on a public
+    # host answering 301 to localhost. curl followed it before we could look,
+    # so the response is discarded here rather than parsed, cached or shown.
+    hops = [block["headers"].get("location", "") for block in blocks]
+    hops.append(final_url)
+    if connected_blocked(remote_ip) or any(hop and url_blocked(hop) for hop in hops):
+        cleanup(dest)
+        return Fetched(0, "", url, "",
+                       "that feed leads somewhere a feed may not reach")
 
     # Even with --max-filesize, a chunked response has no advertised length;
     # the on-disk size is the backstop curl cannot check up front.

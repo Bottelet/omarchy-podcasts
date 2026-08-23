@@ -126,8 +126,10 @@ def main(argv):
             handle.write("\r\n".join(blocks))
 
     if write_format:
+        route_ip = route.get("remote_ip", "203.0.113.10")
         sys.stdout.write(write_format
                          .replace("%{http_code}", str(status))
+                         .replace("%{remote_ip}", route_ip)
                          .replace("%{url_effective}", final_url))
     return 0
 
