@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "Casper Bottelet",
   "license": "MIT",
-  "description": "A podcast client in the bar: episode inbox with quick triage, queue playback via mpv with silence skipping and voice boost, chapters, and gpodder/AntennaPod position sync.",
+  "description": "A podcast client in the bar: an episode inbox you triage in seconds, a queue that plays itself through mpv with per-show speed and voice boost, chapters, and OPML import and export.",
   "kinds": [
     "bar-widget"
   ],

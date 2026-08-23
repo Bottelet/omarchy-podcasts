@@ -124,9 +124,11 @@ function notifyCommand(scriptDir, title, body, icon) {
 
 // -------------------------------------------------------------------- mpv
 
-// Audio only, no config of the user's that could pull in a video output, and
-// idle so the process outlives the end of a track. The socket lives in the
-// runtime dir so it dies with the session.
+// Audio only, idle so the process outlives the end of a track, and no ytdl:
+// an enclosure URL is attacker-chosen, and without --no-ytdl one mpv cannot
+// demux natively gets handed to yt-dlp, which is a great deal more surface
+// than playing an mp3 needs. The user's own mpv config is left alone on
+// purpose — that is where mpv-mpris is loaded from, and MPRIS is a feature.
 function mpvCommand(socketPath) {
   return [
     "mpv",
@@ -137,17 +139,21 @@ function mpvCommand(socketPath) {
     "--audio-display=no",
     "--force-window=no",
     "--keep-open=no",
+    "--no-ytdl",
     "--cache=yes",
     "--input-ipc-server=" + socketPath
   ]
 }
 
 // XDG_RUNTIME_DIR is a 0700 tmpfs that dies with the session — the right
-// home for a control socket. /tmp is the fallback for the rare login that
-// has no runtime dir.
+// home for a control socket, and the only acceptable one. There is no /tmp
+// fallback: a fixed path in a world-writable directory can be created by
+// another account first, and whoever owns that socket sees every loadfile
+// and can answer it. Returning "" disables playback instead, which is the
+// honest outcome on a session with no runtime dir.
 function mpvSocketPath(runtimeDir) {
   var dir = String(runtimeDir || "").replace(/\/+$/, "")
-  if (dir === "") dir = "/tmp"
+  if (dir === "") return ""
   return dir + "/omarchy-podcasts-mpv.sock"
 }
 

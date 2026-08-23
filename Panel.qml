@@ -301,13 +301,14 @@ Panel {
 
   Process {
     id: searchProc
-    // The Podcast Index key and secret go down stdin as two lines; closing
-    // stdin is what tells the helper the pair is complete.
+    // The Podcast Index key and secret go down stdin as two lines. Nothing
+    // assigns to stdinEnabled: writing to it from onStarted would overwrite
+    // this binding, and every later search would find it false, write
+    // nothing, and leave the helper waiting on a pipe that never closes.
+    // The helper reads a line at a time, so no close is needed.
     stdinEnabled: root.indexKey !== "" && root.indexSecret !== ""
     onStarted: {
-      if (!stdinEnabled) return
-      write(root.indexKey + "\n" + root.indexSecret + "\n")
-      stdinEnabled = false
+      if (stdinEnabled) write(root.indexKey + "\n" + root.indexSecret + "\n")
     }
     stdout: StdioCollector {
       waitForEnd: true
@@ -680,10 +681,17 @@ Panel {
     if (root.playerStarted && !mpvSock.connected) mpvSock.connected = true
   }
 
+  readonly property bool playerAvailable: socketPath !== ""
+
   function ensurePlayer() {
+    if (!playerAvailable) {
+      playerError = "no XDG_RUNTIME_DIR, so there is nowhere safe to put the player's control socket"
+      return false
+    }
     playerStarted = true
     if (!mpvProc.running) mpvProc.running = true
     if (!mpvSock.connected && !socketRetry.running) socketRetry.restart()
+    return true
   }
 
   function send(payload) {
@@ -735,7 +743,10 @@ Panel {
     playing = true
     playerError = ""
 
-    ensurePlayer()
+    if (!ensurePlayer()) {
+      playing = false
+      return
+    }
     if (mpvSock.connected) sendLoad(episode.url)
     else pendingUrl = episode.url
 
@@ -1138,17 +1149,6 @@ Panel {
   function setCenterHoverRevealSuppressed(value) {
     if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
-  }
-
-  // Show links come from the feed, so they are quoted and scheme-checked
-  // before xdg-open ever sees them.
-  function shArg(value) {
-    return "'" + String(value).replace(/'/g, "'\\''") + "'"
-  }
-
-  function openLink(url) {
-    if (url && root.bar && /^https?:\/\//i.test(String(url)))
-      root.bar.run("xdg-open " + shArg(url))
   }
 
   IpcHandler {

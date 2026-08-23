@@ -95,7 +95,20 @@ expect("whitespace rejected", pc.valid_url("https://a.example/a b"), "")
 expect("absurdly long URL rejected", pc.valid_url("https://a.example/" + "x" * 2100), "")
 
 expect("tags stripped", pc.plain_text("<p>hi <b>there</b></p>"), "hi there")
-expect("entities unescaped", pc.plain_text("a &amp; b &lt;c&gt;"), "a & b <c>")
+expect("entities unescaped", pc.plain_text("a &amp; b"), "a & b")
+
+# Stripping tags before decoding entities let an escaped tag sail through as
+# text and come back out as live markup — which matters wherever the result
+# leaves QML's PlainText, notably a notification body.
+expect("an escaped tag cannot be reassembled",
+       pc.plain_text('&lt;img src="http://attacker.example/p.png"&gt;'), "")
+expect("a double-escaped tag cannot either",
+       pc.plain_text('&amp;lt;img src=x&amp;gt;'), "")
+expect("an enormous tag is still stripped whole",
+       pc.plain_text("<a" + "x" * 4100 + ">hi"), "hi")
+expect("notification markup is escaped", pc.notify_safe("<b>&</b>"), "&lt;b&gt;&amp;&lt;/b&gt;")
+expect("an empty body is not a DTD", pc.has_doctype(b""), False)
+expect("a whitespace body is not a DTD", pc.has_doctype(b"   \n"), False)
 expect("control chars stripped", pc.plain_text("a\x07b\x00c"), "a b c")
 expect("description truncated", len(pc.plain_text("x" * 5000)), pc.MAX_DESC_CHARS)
 
@@ -144,6 +157,30 @@ expect("a quote-bearing credential is not", pc.CREDENTIAL_RE.match('ab"cd efgh')
 expect("a newline-bearing credential is not", pc.CREDENTIAL_RE.match("abcdefgh\nX") is not None, False)
 
 expect("XML attributes escaped", pc.xml_attr('a"b&c<d'), '"a&quot;b&amp;c&lt;d"')
+
+# Channel metadata must come from direct children of <channel> only: feeds
+# carry containers at that level with their own <title> — Podcasting 2.0's
+# <podcast:liveItem> is one, and it named a real show after a live-stream
+# announcement until the parse was depth-gated.
+import tempfile, os as _os
+_fd, _p = tempfile.mkstemp(suffix=".xml")
+_os.write(_fd, b"""<?xml version="1.0"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:podcast="https://podcastindex.org/namespace/1.0" version="2.0">
+  <channel>
+    <podcast:liveItem><title>A Live Stream</title></podcast:liveItem>
+    <image><title>Artwork Caption</title><url>https://example.com/a.jpg</url></image>
+    <title>The Real Show</title>
+    <item><title>An Episode</title>
+      <enclosure url="https://example.com/e.mp3" type="audio/mpeg"/></item>
+  </channel>
+</rss>""")
+_os.close(_fd)
+_show, _items, _err = pc.parse_feed(_p, "abc123")
+_os.unlink(_p)
+expect("a container's title does not name the show", _show["title"], "The Real Show")
+expect("…and the episode still parses", len(_items), 1)
+expect("…and RSS image artwork is still found", _show["artwork"], "https://example.com/a.jpg")
 expect("numbers clamped", pc.clamp_number("9999999999", 0, 100, 5), 100)
 expect("non-numbers fall back", pc.clamp_number("abc", 0, 100, 5), 5)
 
@@ -427,6 +464,45 @@ run search "anything"
 check "search works with no credentials at all" '.source' 'itunes'
 
 # ------------------------------------------------------------------ artwork
+
+section "Parser memory"
+# clear() empties an item but leaves it parented, so the channel's child list
+# grew for the length of the feed: 12 MB of junk elements peaked at 302 MB
+# before the child list was dropped as well.
+while read -r key value; do
+  case "$key" in
+    junk-bounded) [[ $value == True ]] && ok "a feed of junk elements does not blow memory" || bad "a feed of junk elements does not blow memory" ;;
+    junk-refused) [[ $value == True ]] && ok "…and an absurd element count is refused outright" || bad "…and an absurd element count is refused outright" ;;
+    real-parsed)  [[ $value == True ]] && ok "…while a normal feed still parses in full" || bad "…while a normal feed still parses in full" ;;
+  esac
+done < <(python3 - "$SCRIPT" "$WORK" "$HERE" <<'PYINNER'
+import importlib.util, os, resource, sys
+spec = importlib.util.spec_from_file_location("pc", sys.argv[1])
+pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+
+work, here = sys.argv[2], sys.argv[3]
+junk = os.path.join(work, "junk.xml")
+with open(junk, "wb") as h:
+    h.write(b'<?xml version="1.0"?><rss><channel><title>t</title>')
+    h.write(b"<a/>" * 800000)
+    h.write(b"</channel></rss>")
+base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+pc.parse_feed(junk, "abc123")
+grew = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - base) / 1024.0
+print("junk-bounded", grew < 120)
+
+huge = os.path.join(work, "huge.xml")
+with open(huge, "wb") as h:
+    h.write(b'<?xml version="1.0"?><rss><channel><title>t</title>')
+    h.write(b"<a/>" * (pc.MAX_ELEMENTS + 10))
+    h.write(b"</channel></rss>")
+_show, _items, err = pc.parse_feed(huge, "abc123")
+print("junk-refused", "elements" in (err or ""))
+
+show, items, err = pc.parse_feed(os.path.join(here, "fixtures", "full.xml"), "abc123")
+print("real-parsed", err == "" and show["title"] == "Test Show" and len(items) == 6)
+PYINNER
+)
 
 section "Artwork cache"
 while read -r key value; do

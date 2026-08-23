@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 175-check offline suite with a stub curl |
+| `tests/` | 205-check offline suite with a stub curl |
 
 ## Technical
 
@@ -67,10 +67,20 @@ and persists settings only to this plugin's own `shell.json` entry via
 
 **Feed parsing runs in Python, not bash+jq like the sibling plugins.** The
 9.6 MB / 1,031-episode Syntax feed is the test case that settled it: the
-parse has to stream. `xml.etree.ElementTree.iterparse` with a `clear()` on
-every closing `</item>` holds flat memory regardless of feed size and finishes
-that feed in ~1.3 s wall clock including the download, and it is stdlib, so
-there is nothing to install. A jq/xmlstarlet pipeline would have needed a
+parse has to stream. `xml.etree.ElementTree.iterparse` finishes that feed in
+~1.3 s wall clock including the download, and it is stdlib, so there is
+nothing to install.
+
+Holding memory flat took more than the usual `clear()`, though — a claim
+made here before it was measured, and wrong. `clear()` empties an element but
+leaves it parented, so the channel's child list still grows for the length of
+the feed: 12 MB of junk elements peaked at **302 MB** of RSS. The parse now
+drops the accumulated children as well, which brings that to 22 MB, and caps
+total elements. Channel metadata can no longer be read off a fully-built
+`</channel>`, so each direct child is consumed as it closes — depth-gated,
+because feeds carry containers at channel level with their own `<title>`
+(Podcasting 2.0's `<podcast:liveItem>` is one, and it briefly named a real
+show after a live-stream announcement). A jq/xmlstarlet pipeline would have needed a
 dependency that is not on a stock Omarchy box. QML only ever sees the trimmed
 JSON the script prints — one object per call, `{ok: false, error}` on any
 failure, always exit 0.
@@ -110,9 +120,29 @@ that keeps the same signal names and adds `reorderRequested` and `digitKey`.
 Feed content is attacker-controlled and is handled that way:
 
 - **No shell, anywhere.** curl and mpv are invoked as argv arrays; enclosure
-  URLs reach mpv as JSON strings over the IPC socket. The only `bar.run` call
-  in the plugin is `xdg-open` on a scheme-checked, single-quote-escaped show
-  link.
+  URLs reach mpv as JSON strings over the IPC socket. There is no `bar.run`
+  call and no `sh -c` in the plugin at all — an `xdg-open` helper that quoted
+  its argument correctly but had no callers was deleted rather than left for
+  a reviewer to find.
+- **mpv gets `--no-ytdl`.** Without it, an enclosure URL mpv cannot demux
+  natively is handed to yt-dlp, which is far more surface than playing an mp3
+  needs. The user's own mpv config is deliberately left alone: that is where
+  mpv-mpris loads from.
+- **The control socket lives only in `XDG_RUNTIME_DIR`.** There is no `/tmp`
+  fallback: a fixed path in a world-writable directory can be created by
+  another account first, and whoever owns that socket sees every `loadfile`
+  and can answer it. Without a runtime dir, playback reports that it is
+  unavailable instead.
+- **Entities are decoded before tags are stripped.** The other order let
+  `&lt;img src=http://…&gt;` pass through tag-stripping as text and come back
+  out as live markup — which reaches a notification body, where some daemons
+  render Pango and fetch images. Notification text is escaped again on the
+  way out.
+- **A capped download is a failed one.** curl reports the status line even
+  when it then aborts the transfer, so a `--max-filesize` trip on a chunked
+  response left a truncated body next to a 200. Trusting that once let a
+  truncated feed's ETag be persisted, which would have made a partial episode
+  list authoritative for ever; any non-zero curl exit is now a failure.
 - **HTTPS only.** `--proto '=https' --proto-redir '=https'` pins the protocol
   across redirects so an https feed cannot bounce down to cleartext. `http://`
   feeds are refused unless the user marks that feed as an explicit exception.
@@ -152,13 +182,17 @@ Feed content is attacker-controlled and is handled that way:
   config file on stdin (`-K -`) rather than `-H`. They are pinned to
   `[A-Za-z0-9_-]{8,128}` before use, are sent only to api.podcastindex.org,
   and are never printed.
-- **The state lock cannot wedge the UI.** An OPML import holds the writer
-  lock across one network fetch per feed, so a plain `flock()` would let a
-  concurrent poll block for ever behind it. The wait is bounded at two
-  minutes and then fails with a message, so the worst case is a retry rather
-  than a spinner the user cannot clear.
+- **The state lock is per-feed and bounded.** An OPML import takes the
+  writer lock once per feed rather than once for the import, so a five
+  hundred feed file does not lock out every poll and every click for its
+  duration; the wait is bounded at two minutes on top of that, so the worst
+  case is a retry rather than a spinner the user cannot clear.
+- **stdin has one occupant.** Passing a POST body and credentials on the same
+  request would have curl read the body as a config file, where `output =` is
+  an arbitrary file write and `url =` unwinds the protocol pinning. No caller
+  does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (175 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (205 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
@@ -169,3 +203,27 @@ counter, offline downloads and a `podcast:transcript` viewer are the next
 milestone. The transcript URL is already parsed and stored per episode; the
 `savedSeconds` field in `library.json` is reserved for the Smart Speed
 counter.
+
+## Known limitations
+
+Deliberate, with reasons, so the next reader does not re-litigate them:
+
+- **A feed URL may point at a private or loopback address.** Blocking them
+  would break self-hosted feeds on a LAN, which is a normal thing to want.
+  The exposure is a GET whose body is parsed as XML with errors swallowed,
+  and there is no channel that sends the result anywhere. A related gap is
+  worth knowing about: a 301 or `itunes:new-feed-url` repoints a live
+  subscription silently, keeping the show id and saying nothing in the UI.
+- **`show.allowHttp` has no interface.** Feeds must be HTTPS and there is
+  currently no way for a user to grant a per-feed exception, so the error
+  text that offers one is aspirational. Enclosure URLs are the exception:
+  http ones are kept and played, because a great many old feeds still serve
+  audio that way.
+- **Show ids are 48 bits** (`sha1(feed)[:12]`). A collision costs a user a
+  spurious "already subscribed"; it is free to widen when the state format
+  next changes.
+- **`library` hydrates every episode of every show** and the panel reloads it
+  after every action. At a few dozen shows that is nothing; at five hundred
+  it would be tens of megabytes parsed on the GUI thread.
+- **Artwork is refetched whenever its URL changes**, so a feed that rotates a
+  query string on its artwork costs a download per poll.

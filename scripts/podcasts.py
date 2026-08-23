@@ -42,6 +42,7 @@ API_TIMEOUT = 20
 ART_TIMEOUT = 20
 MAX_ITEMS_PER_FEED = 100        # newest N kept per show
 MAX_ITEMS_SCANNED = 20000       # hard stop on absurd feeds
+MAX_ELEMENTS = 2000000          # ceiling on total elements, junk included
 MAX_DESC_CHARS = 700
 MAX_CHAPTERS = 400
 ART_CACHE_BYTES = 50 * 1024 * 1024
@@ -286,16 +287,26 @@ def valid_url(url, allow_http=False):
     return text if pattern.match(text) else ""
 
 
-TAG_RE = re.compile(r"<[^>]{0,4000}>")
+TAG_RE = re.compile(r"<[^>]*>")
 WS_RE = re.compile(r"\s+")
 CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def plain_text(raw, limit=MAX_DESC_CHARS):
     """Feed HTML → plain text. QML renders every remote string as
-    Text.PlainText too; this is the second of the two belts."""
-    text = TAG_RE.sub(" ", str(raw or ""))
-    text = html.unescape(text)
+    Text.PlainText too; this is the second of the two belts.
+
+    Entities are decoded *before* tags are stripped, and then again, because
+    stripping first lets `&lt;img src=http://…&gt;` sail through as text and
+    come back out as a live tag — which matters where the result leaves QML,
+    notably the body of a desktop notification."""
+    text = str(raw or "")
+    for _pass in range(3):
+        decoded = html.unescape(TAG_RE.sub(" ", text))
+        if decoded == text:
+            break
+        text = decoded
+    text = TAG_RE.sub(" ", text)
     text = CTRL_RE.sub(" ", text)
     text = WS_RE.sub(" ", text).strip()
     return text[:limit]
@@ -452,6 +463,13 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
             stdin_payload = ("\n".join(lines) + "\n").encode("utf-8")
 
     if post is not None:
+        if stdin_payload is not None:
+            # Both want stdin, and curl would read the POST body as a config
+            # file — `output =` in an attacker-controlled body is an
+            # arbitrary file write, and `url =` unwinds the protocol pinning.
+            # No caller does this today; refuse rather than leave it loaded.
+            return Fetched(0, "", url, "",
+                           "cannot send a body and credentials on the same request")
         argv += ["-X", "POST", "-H", "Content-Type: application/json",
                  "--data-binary", "@-"]
         stdin_payload = post.encode("utf-8")
@@ -472,7 +490,11 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     status = int(out[0]) if out and out[0].isdigit() else 0
     final_url = out[1] if len(out) > 1 else url
 
-    if proc.returncode != 0 and status == 0:
+    # curl reports the status line even when it then aborts the transfer —
+    # --max-filesize on a chunked response leaves a truncated body next to a
+    # 200. Trusting the status here once let a truncated feed's ETag be
+    # persisted, which made the partial episode list authoritative for ever.
+    if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         message = CURL_ERRORS.get(proc.returncode)
         if message is None:
@@ -489,7 +511,7 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     # Even with --max-filesize, a chunked response has no advertised length;
     # the on-disk size is the backstop curl cannot check up front.
     try:
-        if os.path.getsize(dest) > max_bytes:
+        if os.path.getsize(dest) >= max_bytes:
             cleanup(dest)
             return Fetched(status, "", final_url, "",
                            "response larger than %d bytes" % max_bytes)
@@ -597,6 +619,8 @@ def has_doctype(head):
     running out of buffer counts as a refusal: no real feed opens with 64 KiB
     of prologue.
     """
+    if not head.strip():
+        return False              # nothing to refuse; the parser will say so
     head = as_utf8_prolog(head)
     index = 0
     size = len(head)
@@ -657,12 +681,23 @@ def text_of(elem):
 
 
 def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
-    """Streaming RSS parse. `item` subtrees are cleared as they close, so
-    memory stays flat regardless of feed size (verified on a 9.6 MB feed)."""
+    """Streaming RSS parse, in flat memory whatever the feed contains.
+
+    Both halves of that matter. `clear()` on a closing `<item>` empties the
+    element but leaves it parented, so the channel's child list still grows
+    for the length of the feed — a 12 MB feed of junk elements peaked at
+    302 MB before the child list was dropped too. And because channel-level
+    metadata can no longer be read off a fully-built `</channel>`, each of
+    its direct children is consumed as it closes instead.
+    """
     show = {"title": "", "author": "", "artwork": "", "description": "",
             "link": "", "newFeed": ""}
     items = []
     scanned = 0
+    elements = 0
+    depth = 0
+    channel = None
+    channel_depth = -1
 
     if prolog_rejects(path):
         return None, [], "that feed declares a DTD, which podcasts do not use"
@@ -672,13 +707,50 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
     except OSError as exc:
         return None, [], "cannot read feed: %s" % exc.strerror
 
+    def take_channel_child(elem, tag):
+        """First value wins, so a feed cannot overwrite its own metadata by
+        repeating a tag further down.
+
+        Only ever called for a direct child of `<channel>`. That matters:
+        feeds carry containers at channel level that hold their own <title>
+        — Podcasting 2.0's `<podcast:liveItem>` and RSS's `<image>` both do —
+        and a scan that took the first <title> it saw anywhere would name the
+        show after a live-stream announcement."""
+        if tag == "title" and not show["title"]:
+            show["title"] = plain_text(text_of(elem), 300)
+        elif tag == "link" and not show["link"]:
+            show["link"] = valid_url(text_of(elem).strip(), True)
+        elif tag in ("description", "summary") and not show["description"]:
+            show["description"] = plain_text(text_of(elem), 900)
+        elif tag == "author" and not show["author"]:
+            show["author"] = plain_text(text_of(elem), 200)
+        elif tag == "owner" and not show["author"]:
+            show["author"] = plain_text(text_of(local(elem, "name", "itunes")), 200)
+        elif tag == "image" and not show["artwork"]:
+            # <itunes:image href="…"/> or RSS's <image><url>…</url></image>.
+            href = valid_url(str(elem.get("href", "")).strip())
+            show["artwork"] = href or valid_url(text_of(local(elem, "url")).strip())
+        elif tag == "new-feed-url" and not show["newFeed"]:
+            show["newFeed"] = valid_url(text_of(elem).strip())
+
     try:
-        parser = ET.iterparse(SanitizingReader(handle), events=("end",))
-        root = None
-        for _event, elem in parser:
-            if root is None:
-                root = elem
+        parser = ET.iterparse(SanitizingReader(handle), events=("start", "end"))
+        for event, elem in parser:
             tag = strip_ns(elem.tag)
+
+            if event == "start":
+                depth += 1
+                elements += 1
+                if elements > MAX_ELEMENTS:
+                    handle.close()
+                    return None, [], "that feed has more elements than any real feed has"
+                if tag == "channel" and channel is None:
+                    channel = elem
+                    channel_depth = depth
+                continue
+
+            at_depth = depth
+            depth -= 1
 
             if tag == "item":
                 scanned += 1
@@ -687,25 +759,19 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
                     if parsed:
                         items.append(parsed)
                 elem.clear()
+                if channel is not None:
+                    del channel[:]
                 continue
 
-            if tag == "channel":
-                # Channel-level metadata lands on the closing </channel>, but
-                # by then items are already cleared — which is what we want.
-                show["title"] = plain_text(text_of(local(elem, "title")), 300)
-                show["link"] = valid_url(text_of(local(elem, "link")).strip(), True)
-                show["description"] = plain_text(
-                    text_of(local(elem, "description")) or
-                    text_of(local(elem, "summary", "itunes")), 900)
-                author = local(elem, "author", "itunes")
-                if author is None:
-                    owner = local(elem, "owner", "itunes")
-                    author = local(owner, "name", "itunes") if owner is not None else None
-                show["author"] = plain_text(text_of(author), 200)
-                show["artwork"] = channel_artwork(elem)
-                new_feed = local(elem, "new-feed-url", "itunes")
-                show["newFeed"] = valid_url(text_of(new_feed).strip()) if new_feed is not None else ""
-                elem.clear()
+            if channel is None or at_depth != channel_depth + 1:
+                # Inside an item (parse_item reads those whole), inside some
+                # other container, or outside the channel entirely.
+                continue
+
+            take_channel_child(elem, tag)
+            elem.clear()
+            if len(channel) > 32:
+                del channel[:]
     except ET.ParseError as exc:
         handle.close()
         if items:
@@ -1115,9 +1181,10 @@ def cmd_search(args):
     if not term:
         emit({"ok": True, "results": [], "source": ""})
     if args.auth_stdin:
-        raw = sys.stdin.read(512).splitlines()
-        args.key = raw[0].strip() if len(raw) > 0 else ""
-        args.secret = raw[1].strip() if len(raw) > 1 else ""
+        # readline, not read: the caller keeps its end of the pipe open, so
+        # waiting for EOF would wait for ever.
+        args.key = sys.stdin.readline(256).strip()
+        args.secret = sys.stdin.readline(256).strip()
     if args.key and args.secret:
         results, error = search_podcastindex(term, args.key, args.secret)
         if results is not None:
@@ -1451,9 +1518,13 @@ def cmd_opml_import(args):
         fail("no feeds found in that OPML file")
 
     added, skipped, failed = 0, 0, []
-    with Lock():
-        shows = load_shows()
-        for url, title in feeds[:500]:
+    for url, title in feeds[:500]:
+        # The lock is taken per feed, not around the whole import: one fetch
+        # can take tens of seconds, and holding it for five hundred of them
+        # would block — or, now that the wait is bounded, fail — every poll
+        # and every click for the duration.
+        with Lock():
+            shows = load_shows()
             show, error = add_feed(shows, url)
             if show is None:
                 failed.append({"feed": url[:120], "title": title, "error": error})
@@ -1462,7 +1533,6 @@ def cmd_opml_import(args):
             else:
                 added += 1
             save_shows(shows)
-        save_shows(shows)
     emit({"ok": True, "added": added, "skipped": skipped,
           "failed": failed[:20], "failedCount": len(failed)})
 
@@ -1545,9 +1615,15 @@ def cmd_art(args):
 
 # ----------------------------------------------------------- notifications
 
+def notify_safe(text):
+    """Notification daemons differ on whether the body is Pango markup, and
+    the ones that render it will fetch an <img>. Escape rather than guess."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 def cmd_notify(args):
-    title = plain_text(args.title, 120) or "Podcasts"
-    body = plain_text(args.body, 300)
+    title = notify_safe(plain_text(args.title, 120)) or "Podcasts"
+    body = notify_safe(plain_text(args.body, 300))
     argv = ["notify-send", "-a", "Podcasts", "-h", "string:x-canonical-private-synchronous:omarchy-podcasts"]
     icon = args.icon or ""
     if icon and os.path.isfile(icon) and os.path.commonpath([os.path.abspath(icon), ART_DIR]) == ART_DIR:
