@@ -127,9 +127,13 @@ def main(argv):
 
     if write_format:
         route_ip = route.get("remote_ip", "203.0.113.10")
+        # curl reports whether this request actually went through a proxy,
+        # which is not the same as one being configured (no_proxy).
+        proxy_used = str(route.get("proxy_used", "0"))
         sys.stdout.write(write_format
                          .replace("%{http_code}", str(status))
                          .replace("%{remote_ip}", route_ip)
+                         .replace("%{proxy_used}", proxy_used)
                          .replace("%{url_effective}", final_url))
     return 0
 

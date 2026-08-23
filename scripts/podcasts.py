@@ -503,6 +503,22 @@ def proxy_configured():
     return any(os.environ.get(name, "").strip() for name in PROXY_VARS)
 
 
+def went_through_proxy(proxy_used):
+    """Whether this particular request actually used one.
+
+    A proxy variable being set is not the same as it being used: curl decides
+    per host via `no_proxy`, and on a direct connection `%{remote_ip}` is the
+    true origin and free to check. `%{proxy_used}` reports which happened.
+    An older curl that does not know the variable leaves it unsubstituted, in
+    which case we fall back to the environment — the same, wider, behaviour as
+    before, rather than blocking every fetch a proxied user makes."""
+    if proxy_used == "0":
+        return False
+    if proxy_used == "1":
+        return True
+    return proxy_configured()
+
+
 def connected_blocked(remote_ip):
     """True if curl connected somewhere a feed must not reach. This is what
     catches a name — `localhost`, or an attacker's host pointed at 127.0.0.1
@@ -603,7 +619,7 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         "-A", USER_AGENT,
         "-D", header_dump,
         "-o", dest,
-        "-w", "%{http_code} %{remote_ip} %{url_effective}",
+        "-w", "%{http_code} %{remote_ip} %{proxy_used} %{url_effective}",
     ]
     for name, value in (headers or {}).items():
         # Header values come from the server's own previous ETag; refuse
@@ -652,10 +668,11 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         cleanup(header_dump)
         return Fetched(0, "", url, "", "curl unavailable: %s" % exc.strerror)
 
-    out = proc.stdout.decode("utf-8", "replace").strip().split(" ", 2)
+    out = proc.stdout.decode("utf-8", "replace").strip().split(" ", 3)
     status = int(out[0]) if out and out[0].isdigit() else 0
     remote_ip = out[1] if len(out) > 1 else ""
-    final_url = out[2] if len(out) > 2 else url
+    proxy_used = out[2] if len(out) > 2 else ""
+    final_url = out[3] if len(out) > 3 else url
 
     # curl reports the status line even when it then aborts the transfer —
     # --max-filesize on a chunked response leaves a truncated body next to a
@@ -681,7 +698,8 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
     # so the response is discarded here rather than parsed, cached or shown.
     hops = [block["headers"].get("location", "") for block in blocks]
     hops.append(final_url)
-    landed_badly = False if proxy_configured() else connected_blocked(remote_ip)
+    landed_badly = (False if went_through_proxy(proxy_used)
+                    else connected_blocked(remote_ip))
     if landed_badly or any(hop and hop_blocked(hop) for hop in hops):
         cleanup(dest)
         return Fetched(0, "", url, "",

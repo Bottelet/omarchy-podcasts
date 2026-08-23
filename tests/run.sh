@@ -433,8 +433,17 @@ check "…as is a bare relative one" '.ok' 'true'
 routes "{\"https://proxied.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"127.0.0.1\"}}"
 run add "https://proxied.example/feed.xml"
 check "without a proxy, a loopback connection is refused" '.ok' 'false'
+routes "{\"https://proxied.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"127.0.0.1\", \"proxy_used\": \"1\"}}"
 OUT="$(http_proxy=http://127.0.0.1:8118 python3 "$SCRIPT" add -- "https://proxied.example/feed.xml" 2>/dev/null)"
 check "behind a proxy, the same fetch succeeds" '.ok' 'true'
+
+# A proxy variable being set is not the same as it being used: no_proxy makes
+# curl connect directly, and then the address it reports is the true origin
+# and free to check.
+python3 "$SCRIPT" remove -- "$(python3 "$SCRIPT" shows | jq -r '.shows[] | select(.feed | test("proxied")) | .id')" >/dev/null 2>&1
+routes "{\"https://proxied.example/feed.xml\": {\"fixture\": \"full.xml\", \"remote_ip\": \"127.0.0.1\", \"proxy_used\": \"0\"}}"
+OUT="$(http_proxy=http://127.0.0.1:8118 python3 "$SCRIPT" add -- "https://proxied.example/feed.xml" 2>/dev/null)"
+check "…but a direct connection is still judged" '.ok' 'false'
 
 while IFS=$'\t' read -r verdict name detail; do
   [[ -z "${verdict:-}" ]] && continue
@@ -464,6 +473,9 @@ cases = [
     ("a public IPv6 address is allowed", pc.address_blocked("2606:4700::1111"), False),
     # A transfer that succeeded without saying where it connected is unknown,
     # not safe — the earlier bool() guard inverted exactly that case.
+    ("a direct connection is judged even with a proxy set",
+     pc.went_through_proxy("0"), False),
+    ("…and a proxied one is not", pc.went_through_proxy("1"), True),
     ("an unreported connection fails closed", pc.connected_blocked(""), True),
     ("…as does an unparseable one", pc.connected_blocked("garbage"), True),
     ("a relative Location is not a host change", pc.hop_blocked("/moved/feed.xml"), False),
