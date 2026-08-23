@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 151-check offline suite with a stub curl |
+| `tests/` | 175-check offline suite with a stub curl |
 
 ## Technical
 
@@ -121,7 +121,17 @@ Feed content is attacker-controlled and is handled that way:
   — the billion-laughs amplification, which no byte cap on the download can
   catch. The prolog is scanned (skipping the XML declaration, PIs and
   comments) and any `<!DOCTYPE` rejects the document. Same check on OPML
-  import.
+  import. Two ways of hiding a DOCTYPE from that scan were found and closed
+  during the security pass, both with regression tests: burying it behind
+  more prologue than the scan window holds (running out of window now counts
+  as a refusal — no real feed opens with 64 KiB of preamble), and writing the
+  feed in UTF-16, where `<` is `3C 00` and an ASCII scan walks straight past
+  the declaration that expat then honours. The head is transcoded before
+  scanning.
+- **Arguments cannot become flags.** Every helper invocation puts a literal
+  `--` between its options and its positionals, so a search term or feed URL
+  beginning with a dash arrives as a value instead of making argparse answer
+  with a usage message where the panel expected JSON.
 - **Everything is capped.** 15 MB per feed, 5 MB per artwork, 2 MB per JSON
   response, 100 newest episodes kept per show, 700 characters of episode
   notes, 400 chapters, 50 MB LRU artwork cache. Timeouts on every request and
@@ -135,10 +145,20 @@ Feed content is attacker-controlled and is handled that way:
   and is HTML-stripped and control-character-scrubbed on the way in. No
   `RichText` sink touches remote content, so a feed cannot trigger a
   zero-click fetch through an `<img>` or a CSS `url()`.
-- **No credentials in logs.** The optional Podcast Index key and secret are
-  read from settings, sent only to api.podcastindex.org, and never printed.
+- **No credentials on argv or in logs.** `/proc/<pid>/cmdline` is
+  world-readable on a stock Linux, so an argument is legible to every other
+  account on the machine. The optional Podcast Index key and secret travel
+  from QML to the helper on stdin, and from the helper to curl through a
+  config file on stdin (`-K -`) rather than `-H`. They are pinned to
+  `[A-Za-z0-9_-]{8,128}` before use, are sent only to api.podcastindex.org,
+  and are never printed.
+- **The state lock cannot wedge the UI.** An OPML import holds the writer
+  lock across one network fetch per feed, so a plain `flock()` would let a
+  concurrent poll block for ever behind it. The wait is bounded at two
+  minutes and then fails with a message, so the worst case is a retry rather
+  than a spinner the user cannot clear.
 
-`tests/run.sh` covers all of the above offline (151 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (175 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

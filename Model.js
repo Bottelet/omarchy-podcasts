@@ -43,8 +43,11 @@ function episodesCommand(scriptDir, showId) {
   return cmd(scriptDir, "episodes", [], [showId])
 }
 
+// Credentials are written to the helper's stdin, never passed as arguments:
+// /proc/<pid>/cmdline is world-readable, so an argv secret is legible to
+// every other account on the machine. See searchProc in Panel.qml.
 function searchCommand(scriptDir, term, key, secret) {
-  var flags = key && secret ? ["--key", String(key), "--secret", String(secret)] : []
+  var flags = key && secret ? ["--auth-stdin"] : []
   return cmd(scriptDir, "search", flags, [term])
 }
 

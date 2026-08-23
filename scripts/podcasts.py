@@ -93,19 +93,35 @@ def ensure_dirs():
         pass
 
 
+# An OPML import holds the lock across one network fetch per feed, so a
+# concurrent poll can be kept waiting for a while — but a plain flock() waits
+# for ever, and a hung helper is a spinner the user cannot clear. Wait, but
+# with an end to it.
+LOCK_TIMEOUT_SECS = 120
+
+
 class Lock(object):
     """Single-writer lock. Mutating commands hold it for their whole run."""
 
-    def __init__(self):
+    def __init__(self, timeout=LOCK_TIMEOUT_SECS):
         self.handle = None
+        self.timeout = timeout
 
     def __enter__(self):
         self.handle = open(LOCK_FILE, "a+")
-        try:
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
-        except OSError as exc:
-            fail("cannot lock state: %s" % exc.strerror)
-        return self
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                    self.handle.close()
+                    fail("cannot lock state: %s" % exc.strerror)
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    fail("another podcast update is still running — try again shortly")
+                time.sleep(0.1)
 
     def __exit__(self, *_exc):
         try:
@@ -153,9 +169,20 @@ def save_json(path, obj):
         fail("cannot write %s: %s" % (os.path.basename(path), exc.strerror))
 
 
+ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+
+
 def load_shows():
+    """Subscriptions, with anything malformed dropped.
+
+    Ids are hex digests we generated, and the only thing that ever becomes a
+    filename — so they are re-checked on the way in rather than trusted
+    because of where they came from."""
     shows = load_json(SHOWS_FILE, [])
-    return [s for s in shows if isinstance(s, dict) and s.get("id") and s.get("feed")]
+    return [s for s in shows
+            if isinstance(s, dict)
+            and isinstance(s.get("id"), str) and ID_RE.match(s["id"])
+            and isinstance(s.get("feed"), str) and s["feed"]]
 
 
 def save_shows(shows):
@@ -374,11 +401,17 @@ def parse_header_dump(path):
 
 
 def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
-         post=None):
+         post=None, secret_headers=None):
     """One HTTP GET (or POST) through curl with an argv list — never a shell.
 
     Redirects are followed but the protocol is pinned, so an https feed cannot
-    bounce us down to cleartext."""
+    bounce us down to cleartext.
+
+    `secret_headers` are passed through a curl config file on stdin rather
+    than as `-H` arguments: /proc/<pid>/cmdline is world-readable on a stock
+    Linux, so anything on argv is legible to every other account on the box.
+    Ordinary headers (conditional-GET validators) have nothing to hide and
+    stay on the command line."""
     if not valid_url(url, allow_http):
         return Fetched(0, "", url, "", "unsupported url")
 
@@ -404,15 +437,30 @@ def curl(url, dest, *, max_bytes, timeout, headers=None, allow_http=False,
         if "\r" in value or "\n" in value:
             continue
         argv += ["-H", "%s: %s" % (name, value)]
+
+    stdin_payload = None
+    if secret_headers:
+        lines = []
+        for name, value in secret_headers.items():
+            # Values are already restricted to a safe alphabet by the caller;
+            # this is the belt to that suspender.
+            if any(c in value for c in '\r\n"\\'):
+                continue
+            lines.append('header = "%s: %s"' % (name, value))
+        if lines:
+            argv += ["-K", "-"]
+            stdin_payload = ("\n".join(lines) + "\n").encode("utf-8")
+
     if post is not None:
         argv += ["-X", "POST", "-H", "Content-Type: application/json",
                  "--data-binary", "@-"]
+        stdin_payload = post.encode("utf-8")
     argv.append(url)
 
     try:
         proc = subprocess.run(
             argv,
-            input=post.encode("utf-8") if post is not None else None,
+            input=stdin_payload,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout + 15)
     except subprocess.TimeoutExpired:
@@ -467,11 +515,12 @@ def tmp_path(tag):
     return os.path.join(TMP_DIR, "%s.%d.%d" % (tag, os.getpid(), int(time.time() * 1000) % 100000))
 
 
-def fetch_json(url, *, timeout=API_TIMEOUT, headers=None, post=None):
+def fetch_json(url, *, timeout=API_TIMEOUT, headers=None, post=None,
+               secret_headers=None):
     dest = tmp_path("json")
     try:
         result = curl(url, dest, max_bytes=MAX_JSON_BYTES, timeout=timeout,
-                      headers=headers, post=post)
+                      headers=headers, post=post, secret_headers=secret_headers)
         if result.error:
             return None, result.error
         if result.status != 200:
@@ -501,8 +550,39 @@ class SanitizingReader(object):
         return self.handle.read(size).translate(self.TABLE)
 
 
+def as_utf8_prolog(head):
+    """The head of the document, transcoded to UTF-8 for scanning.
+
+    expat honours a UTF-16 byte-order mark, so a feed can hide its DOCTYPE
+    from a naive byte scan simply by being UTF-16: `<` is `3C 00` there, and
+    a scanner looking for ASCII would walk straight past the declaration and
+    conclude the prolog was clean. Transcoding first closes that door.
+    """
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        # A UTF-32 BOM starts with the UTF-16 one, so check the longer first.
+        if head[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+            codec = "utf-32"
+        else:
+            codec = "utf-16"
+    elif head[:4] in (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00"):
+        codec = "utf-32"
+    elif head[:2] == b"<\x00" or head[:2] == b"\x00<":
+        # UTF-16 without a BOM. Not legal XML, but worth scanning rather
+        # than trusting.
+        codec = "utf-16-le" if head[:2] == b"<\x00" else "utf-16-be"
+    else:
+        return head
+    try:
+        # An odd-length tail would raise; drop it rather than give up.
+        usable = len(head) - (len(head) % (4 if codec.startswith("utf-32") else 2))
+        return head[:usable].decode(codec, "replace").encode("utf-8", "replace")
+    except (UnicodeDecodeError, LookupError):
+        # Undecodable in the encoding it claims: refuse to guess.
+        return b"<!DOCTYPE unreadable>"
+
+
 def has_doctype(head):
-    """True if the prolog declares a DTD.
+    """True if the prolog declares a DTD, or cannot be shown not to.
 
     A feed has no business carrying one, and expat expands internal entity
     declarations without limit — the billion-laughs amplification, which no
@@ -511,19 +591,24 @@ def has_doctype(head):
     an undefined entity as a parse error.)
 
     Only the prolog can legally hold a DOCTYPE, so walking declarations and
-    comments until the root element starts is a complete check.
+    comments until the root element starts is a complete check — provided the
+    root element is actually reached. A feed that fills the whole window with
+    comments and puts its DOCTYPE beyond it would otherwise slip through, so
+    running out of buffer counts as a refusal: no real feed opens with 64 KiB
+    of prologue.
     """
+    head = as_utf8_prolog(head)
     index = 0
     size = len(head)
     while index < size:
         start = head.find(b"<", index)
         if start == -1:
-            return False
+            break
         marker = head[start + 1:start + 2]
         if marker == b"?":                       # XML declaration or PI
             end = head.find(b"?>", start)
             if end == -1:
-                return False
+                break
             index = end + 2
         elif marker == b"!":
             if head[start:start + 9].lower() == b"<!doctype":
@@ -531,19 +616,23 @@ def has_doctype(head):
             if head[start:start + 4] == b"<!--":
                 end = head.find(b"-->", start)
                 if end == -1:
-                    return False
+                    break
                 index = end + 3
             else:
                 return True                      # any other prolog declaration
         else:
             return False                         # root element — prolog is over
-    return False
+    # Fell off the end of the window still inside the prolog.
+    return True
+
+
+PROLOG_WINDOW = 65536
 
 
 def prolog_rejects(path):
     try:
         with open(path, "rb") as handle:
-            return has_doctype(handle.read(65536))
+            return has_doctype(handle.read(PROLOG_WINDOW))
     except OSError:
         return False
 
@@ -1025,6 +1114,10 @@ def cmd_search(args):
     term = str(args.term or "").strip()
     if not term:
         emit({"ok": True, "results": [], "source": ""})
+    if args.auth_stdin:
+        raw = sys.stdin.read(512).splitlines()
+        args.key = raw[0].strip() if len(raw) > 0 else ""
+        args.secret = raw[1].strip() if len(raw) > 1 else ""
     if args.key and args.secret:
         results, error = search_podcastindex(term, args.key, args.secret)
         if results is not None:
@@ -1064,13 +1157,21 @@ def search_itunes(term):
     return results, ""
 
 
+CREDENTIAL_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
+
 def search_podcastindex(term, key, secret):
+    # Podcast Index issues alphanumeric credentials. Pinning the alphabet
+    # rules out header injection and makes the curl config quoting safe.
+    if not CREDENTIAL_RE.match(key) or not CREDENTIAL_RE.match(secret):
+        return None, "those Podcast Index credentials do not look valid"
     stamp = str(int(time.time()))
     token = hashlib.sha1((key + secret + stamp).encode("utf-8")).hexdigest()
     url = "https://api.podcastindex.org/api/1.0/search/byterm?" + urlencode({
         "q": term[:200], "max": "25"})
-    data, error = fetch_json(url, headers={
-        "X-Auth-Key": key, "X-Auth-Date": stamp, "Authorization": token})
+    data, error = fetch_json(url, headers={"X-Auth-Date": stamp},
+                             secret_headers={"X-Auth-Key": key,
+                                             "Authorization": token})
     if data is None:
         return None, error
     results = []
@@ -1472,6 +1573,9 @@ def build_parser():
 
     p = sub.add_parser("search")
     p.add_argument("term")
+    # Read as two lines on stdin, for the same /proc reason as above. The
+    # flags remain for anyone driving this by hand.
+    p.add_argument("--auth-stdin", action="store_true")
     p.add_argument("--key", default="")
     p.add_argument("--secret", default="")
     p.set_defaults(run=cmd_search)

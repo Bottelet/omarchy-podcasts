@@ -118,6 +118,31 @@ expect("DOCTYPE inside a comment ignored", pc.has_doctype(b'<?xml?><!-- <!DOCTYP
 expect("DOCTYPE-looking body text ignored", pc.has_doctype(b'<rss><t>&lt;!DOCTYPE</t></rss>'), False)
 expect("byte-order mark tolerated", pc.has_doctype(b'\xef\xbb\xbf<?xml?><rss/>'), False)
 
+# A DOCTYPE can hide from a naive byte scan two ways: behind enough prologue
+# to push it out of the window, or inside an encoding the scanner does not
+# speak but expat does. Both were live bypasses of an earlier version of this
+# guard; expat parsed the UTF-16 bomb happily.
+BOMB = b'<!DOCTYPE r [<!ENTITY a "aa">]><rss><channel><title>&a;</title></channel></rss>'
+CLEAN = b'<?xml version="1.0"?><rss version="2.0"><channel><title>ok</title></channel></rss>'
+expect("DOCTYPE padded past the window", pc.has_doctype(b"<!--" + b"x" * 70000 + b"-->" + BOMB), True)
+expect("DOCTYPE hidden in UTF-16", pc.has_doctype(BOMB.decode().encode("utf-16")), True)
+expect("DOCTYPE hidden in UTF-16-BE", pc.has_doctype(BOMB.decode().encode("utf-16-be")), True)
+expect("DOCTYPE hidden in UTF-32", pc.has_doctype(BOMB.decode().encode("utf-32")), True)
+expect("a truncated prolog is refused", pc.has_doctype(b'<?xml version='), True)
+expect("a UTF-16 feed without a DTD still passes", pc.has_doctype(CLEAN.decode().encode("utf-16")), False)
+expect("a long comment before a clean root passes", pc.has_doctype(b"<!--" + b"x" * 400 + b"-->" + CLEAN), False)
+
+# Ids are the only thing that becomes a filename.
+expect("a hex id loads", pc.ID_RE.match("6425ecf474e9") is not None, True)
+expect("a traversing id does not", pc.ID_RE.match("../../etc/passwd") is not None, False)
+expect("a slashed id does not", pc.ID_RE.match("aa/bb") is not None, False)
+
+# Podcast Index credentials are pinned to an alphabet before they reach a
+# curl config line.
+expect("a normal credential is accepted", pc.CREDENTIAL_RE.match("AbC123_-xyz") is not None, True)
+expect("a quote-bearing credential is not", pc.CREDENTIAL_RE.match('ab"cd efgh') is not None, False)
+expect("a newline-bearing credential is not", pc.CREDENTIAL_RE.match("abcdefgh\nX") is not None, False)
+
 expect("XML attributes escaped", pc.xml_attr('a"b&c<d'), '"a&quot;b&amp;c&lt;d"')
 expect("numbers clamped", pc.clamp_number("9999999999", 0, 100, 5), 100)
 expect("non-numbers fall back", pc.clamp_number("abc", 0, 100, 5), 5)
@@ -374,6 +399,32 @@ check "…and the rest are sorted" '.chapters[0].title' 'Intro'
 check "chapter titles are flattened to text" '.chapters[2].title' 'Third bold'
 run chapters "http://example.com/chapters.json"
 check "a cleartext chapters URL is refused" '.ok' 'false'
+
+section "Credentials"
+# The Podcast Index key and secret must never reach argv: /proc/<pid>/cmdline
+# is world-readable, so an argument is legible to every other account on the
+# machine.
+if node -e '
+const M = require(process.argv[1])
+const argv = M.searchCommand("/d/", "syntax", "SECRETKEY", "SECRETVALUE").join(" ")
+process.exit(/SECRETKEY|SECRETVALUE/.test(argv) ? 1 : 0)
+' "$PLUGIN/Model.js" 2>/dev/null; then
+  ok "the search command carries no credentials on argv"
+else
+  bad "the search command carries no credentials on argv" "$(node -e 'console.log(require(process.argv[1]).searchCommand("/d/","syntax","SECRETKEY","SECRETVALUE").join(" "))' "$PLUGIN/Model.js" 2>/dev/null)"
+fi
+
+ITUNES="https://itunes.apple.com/search?term=anything&media=podcast&entity=podcast&limit=25"
+routes "{\"$ITUNES\": {\"fixture\": \"itunes-search.json\"}}"
+OUT="$(printf 'notarealkey123\nnotarealsecret456\n' | python3 "$SCRIPT" search --auth-stdin -- "anything" 2>/dev/null)"
+check "credentials are read from stdin" '.ok' 'true'
+check "…and an unreachable Podcast Index falls back to iTunes" '.source' 'itunes'
+check "…saying why" '.note | test("Podcast Index")' 'true'
+check "results without a feed URL are dropped" '.results | length' '1'
+check "a result keeps its title" '.results[0].title' 'Test Show'
+
+run search "anything"
+check "search works with no credentials at all" '.source' 'itunes'
 
 # ------------------------------------------------------------------ artwork
 

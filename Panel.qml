@@ -301,6 +301,14 @@ Panel {
 
   Process {
     id: searchProc
+    // The Podcast Index key and secret go down stdin as two lines; closing
+    // stdin is what tells the helper the pair is complete.
+    stdinEnabled: root.indexKey !== "" && root.indexSecret !== ""
+    onStarted: {
+      if (!stdinEnabled) return
+      write(root.indexKey + "\n" + root.indexSecret + "\n")
+      stdinEnabled = false
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

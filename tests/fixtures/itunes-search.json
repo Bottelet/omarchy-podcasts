@@ -1,0 +1,4 @@
+{"resultCount":2,"results":[
+  {"collectionName":"Test Show","artistName":"A Host","feedUrl":"https://example.com/feed.xml","artworkUrl600":"https://example.com/art.jpg","trackCount":42},
+  {"collectionName":"No Feed Here","artistName":"Nobody","artworkUrl600":"https://example.com/art2.jpg","trackCount":7}
+]}

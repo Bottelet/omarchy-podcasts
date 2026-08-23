@@ -138,6 +138,9 @@ without it.
   storms.
 - Everything the plugin writes is `0700`/`0600` and lives under
   `~/.local/share/omarchy-podcasts/`.
+- If you supply a Podcast Index key, it never appears on a command line —
+  `/proc` is world-readable, so it goes over stdin to the helper and into
+  curl through a config file instead.
 
 Run the offline test suite yourself:
 
@@ -145,7 +148,7 @@ Run the offline test suite yourself:
 tests/run.sh
 ```
 
-151 checks, no network — a stub curl serves fixtures and simulates redirects,
+175 checks, no network — a stub curl serves fixtures and simulates redirects,
 validators, and transport failures.
 
 ## Remove
