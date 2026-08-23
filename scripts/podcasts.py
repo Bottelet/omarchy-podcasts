@@ -828,14 +828,23 @@ def parse_feed(path, show_id, limit=MAX_ITEMS_PER_FEED):
             if inside_item:
                 continue          # parse_item reads these while they are whole
 
-            if channel is not None and at_depth == channel_depth + 1:
+            if parent is not None and parent is channel:
+                # Parentage, not depth: an element at the same depth but in a
+                # sibling container is not channel metadata, and treating it
+                # as such let a feed name the show — and choose the artwork
+                # URL we then fetch — from outside <channel> entirely.
                 record(elem)
                 elem.clear()
                 del channel[:]
                 continue
 
-            if at_depth == channel_depth + 2:
-                continue          # a channel child still has to read this
+            if parent is not None and parent.tag in WANTED and len(parent) <= 64:
+                # Its parent still has to read it. Bounded, because keying
+                # this on depth alone let any container sitting at channel
+                # level retain every one of its children: 900,000 of them
+                # under a <foo>, or padding a <description>, cost ~95 MB.
+                # A real <image> or <description> has a handful of children.
+                continue
 
             # Anything else is filler: nested padding below a channel child,
             # or an element outside the channel entirely. Emptying it is not
@@ -1095,9 +1104,13 @@ def public_show(show):
     return out
 
 
-def refresh_show(show, force=False):
+def refresh_show(show, force=False, write_episodes=True):
     """One conditional GET + parse. Mutates `show` in place; returns a result
-    dict describing what happened for the caller's report."""
+    dict describing what happened for the caller's report.
+
+    `write_episodes=False` returns the parsed episodes on the result instead
+    of writing them, for a caller that fetches outside the lock and must do
+    every write inside it."""
     headers = {}
     if not force:
         if show.get("etag"):
@@ -1145,7 +1158,8 @@ def refresh_show(show, force=False):
     known = {e["id"] for e in load_episodes(show["id"])}
     fresh = [e["id"] for e in items if e["id"] not in known]
 
-    save_json(episodes_path(show["id"]), items)
+    if write_episodes:
+        save_json(episodes_path(show["id"]), items)
 
     if meta["newFeed"] and normalize_feed(meta["newFeed"]) != normalize_feed(show["feed"]):
         show["feed"] = normalize_feed(meta["newFeed"])
@@ -1161,7 +1175,10 @@ def refresh_show(show, force=False):
     show["count"] = len(items)
     show["failures"] = 0
     show["lastError"] = ""
-    return {"id": show["id"], "status": "ok", "new": len(fresh), "newIds": fresh}
+    result = {"id": show["id"], "status": "ok", "new": len(fresh), "newIds": fresh}
+    if not write_episodes:
+        result["items"] = items
+    return result
 
 
 def note_failure(show, message):
@@ -1453,6 +1470,16 @@ def apply_new(show, new_ids, lib):
 def prune_triage(shows, lib):
     """Triage/position entries for episodes that have aged out of every feed
     are dead weight; drop them so state cannot grow without bound."""
+    keep = {show["id"] for show in shows}
+    try:
+        for name in os.listdir(EPISODE_DIR):
+            if name.endswith(".json") and name[:-5] not in keep:
+                # No subscription names this file: an unsubscribe that raced
+                # a write, or an import that ended between its two writes.
+                cleanup(os.path.join(EPISODE_DIR, name))
+    except OSError:
+        pass
+
     live = set()
     for show in shows:
         live.update(e["id"] for e in load_episodes(show["id"]))
@@ -1619,22 +1646,40 @@ def cmd_opml_import(args):
                            "error": "that URL is not https"})
             continue
         show_id = show_id_for(candidate)
-        prepared = default_show(candidate, show_id)
-        result = refresh_show(prepared, force=True)
 
+        # Ask whether we already have it before paying for the download.
+        # Re-importing the same file used to force a full refetch of every
+        # subscription — up to 500 feeds, ignoring their stored validators —
+        # and then discard the result as "skipped".
+        with Lock():
+            if find_show(load_shows(), show_id):
+                skipped += 1
+                continue
+
+        prepared = default_show(candidate, show_id)
+        result = refresh_show(prepared, force=True, write_episodes=False)
+        if result["status"] == "error":
+            failed.append({"feed": candidate[:120], "title": title,
+                           "error": result.get("error", "could not read that feed")})
+            continue
+
+        items = result.get("items", [])
+        prepared["baseline"] = max([e["pub"] for e in items] or [0])
+
+        # Both writes under one lock. Writing the episodes file outside it
+        # broke the single-writer invariant a concurrent poll relies on to
+        # decide what is new, and a run that ended between the two writes —
+        # which the lock's own timeout can cause, not just a kill — left an
+        # episodes file behind with no subscription naming it.
         with Lock():
             shows = load_shows()
             if find_show(shows, show_id):
                 skipped += 1
-            elif result["status"] == "error":
-                failed.append({"feed": candidate[:120], "title": title,
-                               "error": result.get("error", "could not read that feed")})
-            else:
-                episodes = load_episodes(show_id)
-                prepared["baseline"] = max([e["pub"] for e in episodes] or [0])
-                shows.append(prepared)
-                added += 1
-                save_shows(shows)
+                continue
+            save_json(episodes_path(show_id), items)
+            shows.append(prepared)
+            save_shows(shows)
+            added += 1
     emit({"ok": True, "added": added, "skipped": skipped,
           "failed": failed[:20], "failedCount": len(failed)})
 

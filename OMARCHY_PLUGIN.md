@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 220-check offline suite with a stub curl |
+| `tests/` | 229-check offline suite with a stub curl |
 
 ## Technical
 
@@ -80,8 +80,10 @@ still let 1.9M *nested* elements reach **608 MB** — worse than the original,
 and returning success so nothing flagged it. What holds now:
 
 - every element is detached from its parent as it closes, not merely
-  cleared, with items and the direct children of `<channel>` exempt because
-  something still has to read them;
+  cleared, with items exempt, and a channel child's own children exempt only
+  while that child holds fewer than 64 of them — exempting by *depth* let any
+  container sitting at channel level keep every child it had, so 900,000 of
+  them under a `<foo>`, or padding a `<description>`, still cost ~95 MB;
 - channel metadata is taken as text the moment each direct child closes, so
   nothing is retained to the end — keeping those elements around was itself
   87 MB when a feed put 400k junk elements at channel level;
@@ -90,9 +92,13 @@ and returning success so nothing flagged it. What holds now:
   bounds the descent.
 
 Every adversarial shape now sits at ~20 MB. Reading metadata per closing
-child is also why the parse is depth-gated: feeds carry containers at channel
-level with their own `<title>` (Podcasting 2.0's `<podcast:liveItem>` is one,
-and it briefly named a real show after a live-stream announcement).
+child is also why a channel child is identified by **parentage rather than
+depth**. Feeds carry containers at channel level with their own `<title>`
+(Podcasting 2.0's `<podcast:liveItem>` is one, and it briefly named a real
+show after a live-stream announcement), and matching on depth alone went
+further wrong than that: a feed could put its `<title>` and its
+`<itunes:image href>` in a sibling container *outside* `<channel>` and have
+both taken — including an artwork URL the helper then fetches.
 
 **Channel metadata is resolved by preference, not by order of appearance.**
 That distinction is not academic: Megaphone emits `<image>` before
@@ -207,6 +213,13 @@ Feed content is attacker-controlled and is handled that way:
   config file on stdin (`-K -`) rather than `-H`. They are pinned to
   `[A-Za-z0-9_-]{8,128}` before use, are sent only to api.podcastindex.org,
   and are never printed.
+- **An episodes file never outlives its subscription.** The import writes
+  `episodes/<id>.json` and `shows.json` under one lock, so a run that ends
+  between them — which the lock's own timeout can cause, not only a kill —
+  cannot leave a file no subscription names; a sweep clears any historical
+  ones. It also asks whether a feed is already subscribed *before* fetching,
+  so re-importing the same OPML no longer forces a full refetch of every
+  subscription and then discards the result.
 - **The state lock covers the write, not the fetch.** An OPML import fetches
   each feed with no lock held and takes it only around the read-modify-write.
   Holding it for the whole import made every poll and click wait for hours;
@@ -220,7 +233,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (220 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (229 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 

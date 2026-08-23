@@ -244,6 +244,23 @@ expect("itunes:owner fills in for a missing itunes:author",
 expect("a bare author is a last resort",
        _parse('<title>S</title><author>webmaster@a.example</author>')["author"],
        "webmaster@a.example")
+
+# Channel metadata is claimed by parentage, not by depth. Matching on depth
+# let a feed put its <title> and its <itunes:image href> in a sibling
+# container outside <channel> and have both taken — and that artwork URL is
+# then fetched by the helper.
+_fd, _hj = tempfile.mkstemp(suffix=".xml")
+_os.write(_fd, b"""<?xml version="1.0"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" version="2.0">
+  <channel><item><title>E</title><enclosure url="https://e.example/a.mp3"/></item></channel>
+  <other><title>HIJACKED</title><itunes:image href="https://evil.example/x.jpg"/></other>
+</rss>""")
+_os.close(_fd)
+_hijacked, _hitems, _ = pc.parse_feed(_hj, "abc123")
+_os.unlink(_hj)
+expect("a sibling container cannot name the show", _hijacked["title"], "")
+expect("…nor choose the artwork we fetch", _hijacked["artwork"], "")
+expect("…and the real channel's item still parses", len(_hitems), 1)
 expect("…and the episode still parses", len(_items), 1)
 expect("…and RSS image artwork is still found", _show["artwork"], "https://example.com/a.jpg")
 expect("numbers clamped", pc.clamp_number("9999999999", 0, 100, 5), 100)
@@ -490,6 +507,39 @@ check "an OPML file with a DTD is refused" '.ok' 'false'
 run opml-import "$WORK/nope.opml"
 check "a missing OPML file is a clean error" '.ok' 'false'
 
+# Re-importing used to force a full refetch of every subscription, ignoring
+# their validators, and then throw the result away as "skipped".
+: > "$WORK/curl.log"
+cat > "$WORK/bin/curl" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$WORK/curl.log"
+exec python3 "$HERE/fake-curl.py" "\$@"
+EOF
+chmod +x "$WORK/bin/curl"
+run opml-import "$HERE/fixtures/subs.opml"
+check "a repeat import adds nothing" '.added' '0'
+if grep -q "example.com" "$WORK/curl.log"; then
+  bad "…and does not refetch what it already has" "$(head -1 "$WORK/curl.log")"
+else
+  ok "…and does not refetch what it already has"
+fi
+
+# An episodes file must never outlive the subscription that named it: the
+# import writes both under one lock, and a sweep clears anything historical.
+touch "$OMARCHY_PODCASTS_DIR/episodes/deadbeefdead.json"
+run refresh
+if [[ -e "$OMARCHY_PODCASTS_DIR/episodes/deadbeefdead.json" ]]; then
+  bad "an orphaned episodes file is swept" "still present after refresh"
+else
+  ok "an orphaned episodes file is swept"
+fi
+SURVIVOR="$(python3 "$SCRIPT" shows | jq -r '.shows[0].id')"
+if [[ -e "$OMARCHY_PODCASTS_DIR/episodes/$SURVIVOR.json" ]]; then
+  ok "…while a live show keeps its episodes"
+else
+  bad "…while a live show keeps its episodes" "$SURVIVOR.json was removed"
+fi
+
 # ------------------------------------------------------------------- chapters
 
 section "Chapters"
@@ -544,6 +594,8 @@ while read -r key value; do
     deep)       [[ $value == True ]] && ok "deep nesting is refused rather than absorbed" || bad "deep nesting is refused rather than absorbed" ;;
     contained)  [[ $value == True ]] && ok "…including nesting inside a container" || bad "…including nesting inside a container" ;;
     elements)   [[ $value == True ]] && ok "an absurd element count is refused" || bad "an absurd element count is refused" ;;
+    container)  [[ $value == True ]] && ok "padding inside a channel-level container stays flat" || bad "padding inside a channel-level container stays flat" ;;
+    padded-image) [[ $value == True ]] && ok "…as does padding inside <image>" || bad "…as does padding inside <image>" ;;
     real)       [[ $value == True ]] && ok "…while a normal feed still parses in full" || bad "…while a normal feed still parses in full" ;;
   esac
 done < <(python3 - "$SCRIPT" "$WORK" "$HERE" <<'PYINNER'
@@ -575,6 +627,14 @@ grew, err = run("contained", CH + b"<box>" + b"<a>" * 200000 + b"</a>" * 200000 
 print("contained", "nested" in (err or "") and grew < 100)
 grew, err = run("elements", CH + b"<a/>" * (pc.MAX_ELEMENTS + 10) + b"</channel></rss>")
 print("elements", "elements" in (err or ""))
+
+# Exempting by depth meant any container sitting at channel level kept every
+# child it had, padding included.
+grew, err = run("container", CH + b"<foo>" + b"<a/>" * 400000 + b"</foo></channel></rss>")
+print("container", grew < 100)
+grew, err = run("padded-image", CH + b"<image><url>https://a/i.jpg</url>"
+                + b"<a/>" * 400000 + b"</image></channel></rss>")
+print("padded-image", grew < 100)
 
 show, items, err = pc.parse_feed(os.path.join(here, "fixtures", "full.xml"), "abc123")
 print("real", err == "" and show["title"] == "Test Show" and len(items) == 6)
