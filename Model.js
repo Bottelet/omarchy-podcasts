@@ -20,11 +20,13 @@ function helper(scriptDir) {
 // would otherwise be parsed as an option and the helper would answer with a
 // usage message instead of JSON.
 function cmd(scriptDir, subcommand, flags, positionals) {
-  return helper(scriptDir)
-    .concat([subcommand])
-    .concat(flags || [])
-    .concat(["--"])
-    .concat((positionals || []).map(String))
+  var argv = helper(scriptDir).concat([subcommand]).concat(flags || [])
+  var values = (positionals || []).map(String)
+  // Only when there is something to separate: argparse rejects a bare `--`
+  // on a subcommand that declares no positionals, which is every read-only
+  // one here (library, shows, refresh, archive-all).
+  if (values.length > 0) argv = argv.concat(["--"]).concat(values)
+  return argv
 }
 
 function initCommand(scriptDir) {

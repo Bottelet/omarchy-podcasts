@@ -550,6 +550,58 @@ for (const [verdict, name, detail] of out) {
 ' "$PLUGIN/Model.js")
 fi
 
+# ------------------------------------------------- Model.js -> helper wiring
+
+# The two halves were tested apart and agreed on paper while disagreeing in
+# practice: an `--` terminator that argparse accepts after a positional is a
+# hard error on the subcommands that declare none, and every read-only call
+# the panel makes is one of those. This runs the argv Model.js actually
+# builds through the real helper and insists on JSON coming back.
+section "Model.js commands against the helper"
+if ! command -v node >/dev/null 2>&1; then
+  printf '  \033[33m-\033[0m skipped: node is not installed\n'
+else
+  ITUNES_WIRE="https://itunes.apple.com/search?term=wiring&media=podcast&entity=podcast&limit=25"
+  routes "{\"$ITUNES_WIRE\": {\"fixture\": \"itunes-search.json\"}}"
+  SOME_SHOW="$(python3 "$SCRIPT" shows | jq -r '.shows[0].id // "deadbeef1234"')"
+
+  while IFS=$'\t' read -r label argv_json; do
+    [[ -z "${label:-}" ]] && continue
+    mapfile -t ARGV < <(printf '%s' "$argv_json" | jq -r '.[]')
+    reply="$("${ARGV[@]}" 2>/dev/null)"
+    if printf '%s' "$reply" | jq -e 'has("ok")' >/dev/null 2>&1; then
+      ok "$label answers with JSON"
+    else
+      bad "$label answers with JSON" "got: $(printf '%s' "$reply" | head -c 120)"
+    fi
+  done < <(node -e '
+const M = require(process.argv[1])
+const d = process.argv[2] + "/"
+const show = process.argv[3]
+const commands = [
+  ["library",      M.libraryCommand(d)],
+  ["shows",        M.showsCommand(d)],
+  ["init",         M.initCommand(d)],
+  ["archive-all",  M.archiveAllCommand(d)],
+  ["refresh all",  M.refreshCommand(d, "", false)],
+  ["refresh one",  M.refreshCommand(d, show, true)],
+  ["episodes",     M.episodesCommand(d, show)],
+  ["search",       M.searchCommand(d, "wiring", "", "")],
+  ["triage",       M.triageCommand(d, "archive", "0123456789abcdef")],
+  ["queue add",    M.queueCommand(d, "add", "0123456789abcdef", {})],
+  ["queue move",   M.queueCommand(d, "move", "0123456789abcdef", {delta: -1})],
+  ["queue clear",  M.queueCommand(d, "clear", "", {})],
+  ["position",     M.positionCommand(d, "0123456789abcdef", 12, 60, {now: true})],
+  ["show-set",     M.showSetCommand(d, show, "mode", "inbox")],
+  ["chapters",     M.chaptersCommand(d, "https://example.com/chapters.json")],
+  ["art",          M.artCommand(d, ["https://example.com/art.jpg"])],
+  ["notify",       M.notifyCommand(d, "A show", "An episode")],
+  ["opml-export",  M.opmlExportCommand(d, process.argv[4])],
+]
+for (const [label, argv] of commands) console.log(label + "\t" + JSON.stringify(argv))
+' "$PLUGIN/Model.js" "$PLUGIN/scripts" "$SOME_SHOW" "$WORK/wire.opml")
+fi
+
 # -------------------------------------------------------------------- summary
 
 printf '\n'
