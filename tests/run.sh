@@ -427,6 +427,19 @@ cases = [
     ("…and the connected address decides", pc.connected_blocked("127.0.0.1"), True),
     ("…including the metadata endpoint", pc.connected_blocked("169.254.169.254"), True),
     ("…while a public one is fine", pc.connected_blocked("93.184.216.34"), False),
+    # ::ffff:127.0.0.1 is loopback wearing a hat: it parses as IPv6, so a
+    # check against 127.0.0.0/8 never matched it, and curl reads it back the
+    # same way, so neither stage caught it. 6to4 and Teredo embed one too.
+    ("IPv4-mapped loopback is blocked", pc.address_blocked("::ffff:127.0.0.1"), True),
+    ("…in its hex spelling too", pc.address_blocked("::ffff:7f00:1"), True),
+    ("…and the mapped metadata endpoint", pc.address_blocked("::ffff:169.254.169.254"), True),
+    ("6to4 wrapping loopback is blocked", pc.address_blocked("2002:7f00:0001::"), True),
+    ("multicast is blocked", pc.address_blocked("224.0.0.1"), True),
+    ("reserved space is blocked", pc.address_blocked("240.0.0.1"), True),
+    ("a mapped LAN address is still allowed", pc.address_blocked("::ffff:192.168.1.5"), False),
+    ("a mapped public address is still allowed", pc.address_blocked("::ffff:93.184.216.34"), False),
+    ("IPv6 unique-local is still allowed", pc.address_blocked("fd00::1"), False),
+    ("a public IPv6 address is allowed", pc.address_blocked("2606:4700::1111"), False),
     ("a LAN address is still allowed", pc.address_blocked("192.168.1.50"), False),
     ("…as is the 10/8 range", pc.address_blocked("10.0.0.4"), False),
     ("…and 172.16/12", pc.address_blocked("172.16.5.5"), False),

@@ -421,19 +421,20 @@ def parse_date(raw):
 
 # --------------------------------------------------------------- fetching
 
-# Addresses a feed has no business sending us to. Private LAN ranges are
-# deliberately NOT here: a self-hosted podcast server on 192.168.x is a normal
-# thing to subscribe to, and refusing it would break a real use case to close
-# a hole that loopback and link-local already account for. Link-local covers
-# the cloud metadata endpoint at 169.254.169.254.
-BLOCKED_NETWORKS = (
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("::/128"),
-)
+def unwrap_address(address):
+    """An IPv6 address that is really an IPv4 one, unwrapped.
+
+    `::ffff:127.0.0.1` is loopback wearing a hat: it parses as IPv6, so a
+    check against 127.0.0.0/8 never matches it, and it reads back the same
+    way from curl. 6to4 and Teredo embed an IPv4 address the same way."""
+    if address.version != 6:
+        return address
+    for embedded in (address.ipv4_mapped, address.sixtofour):
+        if embedded is not None:
+            return embedded
+    if address.teredo is not None:
+        return address.teredo[1]
+    return address
 
 def address_blocked(text):
     """True if `text` is a literal address a feed must not send us to.
@@ -450,10 +451,16 @@ def address_blocked(text):
     if not text:
         return True
     try:
-        address = ipaddress.ip_address(text)
+        address = unwrap_address(ipaddress.ip_address(text))
     except ValueError:
         return False          # a name; judged after the connection
-    return any(address in network for network in BLOCKED_NETWORKS)
+    # Private LAN ranges are deliberately allowed: a self-hosted podcast
+    # server on 192.168.x, or its IPv6 unique-local equivalent, is a normal
+    # thing to subscribe to. is_link_local covers the cloud metadata endpoint
+    # at 169.254.169.254.
+    return (address.is_loopback or address.is_link_local
+            or address.is_unspecified or address.is_multicast
+            or address.is_reserved)
 
 
 def url_blocked(url):

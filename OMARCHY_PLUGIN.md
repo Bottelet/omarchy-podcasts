@@ -54,7 +54,7 @@ them at a time.
 | `KeyCatcher.qml` | `qs.Ui.PanelKeyCatcher`'s contract plus modifier-aware movement |
 | `Model.js` | Command builders, mpv IPC messages, parsing, formatting |
 | `scripts/podcasts.py` | Feeds, library, artwork, OPML, chapters, notifications |
-| `tests/` | 262-check offline suite with a stub curl |
+| `tests/` | 272-check offline suite with a stub curl |
 
 ## Technical
 
@@ -198,14 +198,21 @@ Feed content is attacker-controlled and is handled that way:
   notes, 400 chapters, 50 MB LRU artwork cache. Timeouts on every request and
   no retries.
 - **A feed cannot send us somewhere only this machine can reach.** Loopback,
-  link-local (which includes the cloud metadata endpoint at 169.254.169.254)
-  and the unspecified address are refused on every feed-controlled URL —
+  link-local (which includes the cloud metadata endpoint at 169.254.169.254),
+  unspecified, multicast and reserved addresses are refused on every
+  feed-controlled URL —
   the feed itself, artwork, and `podcast:chapters`, whose titles render back
   into the panel and would otherwise be a read primitive against an internal
   service. Private LAN ranges are deliberately *not* blocked: a self-hosted
   podcast server on 192.168.x is a normal thing to subscribe to, and refusing
   it would break a real use case to close a hole loopback already accounts
   for.
+
+  Addresses are unwrapped before they are judged. `::ffff:127.0.0.1` is
+  loopback wearing a hat: it parses as IPv6, so a check against `127.0.0.0/8`
+  never matched it, and curl reads it back in the same form — so neither
+  stage caught it until IPv4-mapped, 6to4 and Teredo addresses were unwrapped
+  first.
 
   Literal addresses are refused before anything leaves the machine. Names are
   judged afterwards, on `%{remote_ip}` — the address curl actually connected
@@ -265,7 +272,7 @@ Feed content is attacker-controlled and is handled that way:
   an arbitrary file write and `url =` unwinds the protocol pinning. No caller
   does this; the combination is refused rather than left loaded.
 
-`tests/run.sh` covers all of the above offline (262 checks; a stub curl serves
+`tests/run.sh` covers all of the above offline (272 checks; a stub curl serves
 fixtures and simulates 304s, permanent redirects, transport failures and
 oversized bodies).
 
